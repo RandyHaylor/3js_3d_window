@@ -53,8 +53,9 @@ export class FaceTracker {
   }
 
   // Returns undefined when there is no new video frame, null when no face is found,
-  // otherwise { a, b, irises, faceMatrix, videoW, videoH }: the two iris centers, each
-  // iris's 4 boundary landmarks, and the metric (cm) face transform as a flat array.
+  // otherwise { box, a, b, irises, faceMatrix, videoW, videoH }: the face bounding box,
+  // the two iris centers, each iris's 4 boundary landmarks, and the metric (cm) face
+  // transform as a flat array.
   detect(nowMs) {
     const v = this.video;
     if (!this.landmarker || v.readyState < 2 || v.currentTime === this.lastVideoTime) return undefined;
@@ -62,7 +63,15 @@ export class FaceTracker {
     const res = this.landmarker.detectForVideo(v, nowMs);
     const lm = res.faceLandmarks?.[0];
     if (!lm || lm.length <= IRIS_B + 4) return null;
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const p of lm) {
+      if (p.x < x0) x0 = p.x;
+      if (p.x > x1) x1 = p.x;
+      if (p.y < y0) y0 = p.y;
+      if (p.y > y1) y1 = p.y;
+    }
     return {
+      box: { x0, y0, x1, y1 }, // normalized face bounding box
       a: lm[IRIS_A],
       b: lm[IRIS_B],
       irises: [lm.slice(IRIS_A + 1, IRIS_A + 5), lm.slice(IRIS_B + 1, IRIS_B + 5)],
