@@ -50,6 +50,14 @@ export function eyeFromIris(left, right, videoW, videoH, cal, screenH) {
   return { x, y, z, ipdPx };
 }
 
+// Pin the eye to a fixed distance so leaning in/out does not stretch the scene's
+// depth. The eye keeps its direction as seen from the camera (camY above screen
+// center), so lateral/vertical parallax is unchanged.
+export function lockDepth(eye, lockedZ, camY) {
+  const k = lockedZ / eye.z;
+  return { x: eye.x * k, y: (eye.y - camY) * k + camY, z: lockedZ };
+}
+
 export const lerp = (a, b, t) => a + (b - a) * t;
 
 // Frame-rate-independent exponential approach factor for time constant tau (s).
