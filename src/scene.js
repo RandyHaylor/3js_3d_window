@@ -3,7 +3,10 @@ import * as THREE from 'three';
 // A fixed diorama-scale room (meters). The phone screen sits at the origin in the
 // z=0 plane; most of the room lies behind it (-z) but it also wraps around the
 // viewer so rotating the phone reveals the side walls.
-const ROOM = { x0: -0.4, x1: 0.4, y0: -0.16, y1: 0.36, z0: -1.0, z1: 0.6 };
+const ROOM = { x0: -0.4, x1: 0.4, y0: -0.4, y1: 0.28, z0: -1.0, z1: 0.6 };
+// Height the objects are arranged on. Kept above the floor so the floor sits well
+// below the screen's lower edge while the objects stay in view.
+const BASE_Y = -0.16;
 const GRID_STEP = 0.05;
 
 function gridPlane(width, height, step, color, opacity) {
@@ -83,15 +86,18 @@ function shadowed(mesh) {
   return mesh;
 }
 
+// A stand rising from the floor to `height` above BASE_Y.
 function pedestal(x, z, height, radius, color) {
-  const m = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 1.1, height, 32), std(color)));
-  m.position.set(x, ROOM.y0 + height / 2, z);
+  const top = BASE_Y + height;
+  const len = top - ROOM.y0;
+  const m = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 1.1, len, 32), std(color)));
+  m.position.set(x, ROOM.y0 + len / 2, z);
   return m;
 }
 
 function buildObjects() {
   const g = new THREE.Group();
-  const floorY = ROOM.y0;
+  const floorY = BASE_Y;
 
   // Foreground: a torus knot just behind the glass, on a slim stand.
   const fgStandH = 0.13;
