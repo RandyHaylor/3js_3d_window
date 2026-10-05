@@ -167,5 +167,12 @@ export function createScene() {
   fill.position.set(0.3, 0.5, 0.5);
   world.add(fill);
 
-  return { scene, world };
+  // Uniformly resize the world. The point light falls off with distance, so its
+  // intensity is compensated to keep brightness the same.
+  function setWorldScale(s) {
+    world.scale.setScalar(s);
+    key.intensity = 1.6 * Math.pow(s, 1.2);
+  }
+
+  return { scene, setWorldScale };
 }

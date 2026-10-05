@@ -33,6 +33,15 @@ test('eye distance comes from the iris gap and IPD', () => {
   near(eye.x, 0, 1e-9);
 });
 
+test('depth scale changes distance only, not lateral position', () => {
+  const base = { ipdM: 0.064, fovLongDeg: 90, camOffsetM: 0, flipX: false, depthScale: 1 };
+  const a = { x: 0.35, y: 0.5, z: 0 }, b = { x: 0.45, y: 0.5, z: 0 };
+  const e1 = eyeFromIris(a, b, 640, 480, base, 0);
+  const e2 = eyeFromIris(a, b, 640, 480, { ...base, depthScale: 2 }, 0);
+  near(e2.z, e1.z * 2);
+  near(e2.x, e1.x);
+});
+
 test('viewer moving toward image-left maps to screen +x', () => {
   const cal = { ipdM: 0.064, fovLongDeg: 90, camOffsetM: 0, flipX: false, depthScale: 1 };
   const eye = eyeFromIris({ x: 0.35, y: 0.5, z: 0 }, { x: 0.45, y: 0.5, z: 0 }, 640, 480, cal, 0);

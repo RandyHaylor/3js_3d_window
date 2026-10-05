@@ -41,12 +41,15 @@ export function eyeFromIris(left, right, videoW, videoH, cal, screenH) {
   const u = ((left.x + right.x) / 2) * videoW;
   const v = ((left.y + right.y) / 2) * videoH;
 
-  const z = ((f * cal.ipdM) / ipdPx) * cal.depthScale;
+  const dist = (f * cal.ipdM) / ipdPx;
   // The raw front-camera image is not mirrored: when the viewer moves to their right,
   // they move toward the image's left (-u). Screen +x is the viewer's right.
   const sx = cal.flipX ? 1 : -1;
-  const x = (sx * (u - videoW / 2) * z) / f;
-  const y = (-(v - videoH / 2) * z) / f + screenH / 2 + cal.camOffsetM;
+  const x = (sx * (u - videoW / 2) * dist) / f;
+  const y = (-(v - videoH / 2) * dist) / f + screenH / 2 + cal.camOffsetM;
+  // depthScale only scales distance: that stretches the scene's depth uniformly,
+  // while scaling x/y with it would make depth stretch more as the viewer leans in.
+  const z = dist * cal.depthScale;
   return { x, y, z, ipdPx };
 }
 

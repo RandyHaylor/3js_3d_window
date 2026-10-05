@@ -32,9 +32,12 @@ const SLIDERS = [
   { key: 'ipdMm', label: 'Eye spacing (IPD)', unit: 'mm', min: 50, max: 76, step: 0.5 },
   { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the z readout against a ruler.' },
   { key: 'camOffsetMm', label: 'Camera above screen top', unit: 'mm', min: -20, max: 30, step: 0.5 },
-  { key: 'depthScale', label: 'Depth scale', unit: '×', min: 0.5, max: 2, step: 0.01 },
-  { key: 'worldScale', label: 'World scale', unit: '×', min: 0.5, max: 3, step: 0.05 },
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
+];
+// Quick-access sliders in the top-corner Adjust drawer.
+const ADJUST = [
+  { key: 'depthScale', label: 'Depth', unit: '×', min: 0.3, max: 3, step: 0.01 },
+  { key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 },
 ];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
@@ -80,7 +83,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-const { scene, world } = createScene();
+const { scene, setWorldScale } = createScene();
 const camera = new THREE.PerspectiveCamera();
 const rig = new THREE.Object3D(); // the phone: screen at its origin, +z toward the viewer
 const targetQ = new THREE.Quaternion();
@@ -184,7 +187,7 @@ renderer.setAnimationLoop((nowMs) => {
   if (mode === 'camera') updateTracking(t, nowMs, dt);
   else if (mode === 'sim') moveToward(eye, simEye, approach(dt, 0.05));
 
-  world.scale.setScalar(settings.worldScale);
+  setWorldScale(settings.worldScale);
   updateCamera(dt);
   renderer.render(scene, camera);
 
@@ -260,7 +263,7 @@ $('simulate').addEventListener('click', () => {
   errorEl.hidden = true;
   mode = 'sim';
   showHud();
-  setStatus('Simulated eye: drag or move the pointer');
+  setStatus('Simulated eye');
 });
 
 // Simulated eye: pointer position over the screen, wheel for distance.
@@ -292,10 +295,8 @@ function fmt(v, step) {
   return step < 1 ? String(+v.toFixed(2)) : String(Math.round(v));
 }
 
-function buildSettings() {
-  const body = $('settingsBody');
-  body.textContent = '';
-  for (const s of SLIDERS) {
+function buildSliders(body, list) {
+  for (const s of list) {
     const row = document.createElement('div');
     row.className = 'setting';
     const id = `set-${s.key}`;
@@ -311,6 +312,12 @@ function buildSettings() {
     });
     body.appendChild(row);
   }
+}
+
+function buildSettings() {
+  const body = $('settingsBody');
+  body.textContent = '';
+  buildSliders(body, SLIDERS);
   for (const s of TOGGLES) {
     const row = document.createElement('label');
     row.className = 'setting toggle';
@@ -342,8 +349,22 @@ $('settingsClose').addEventListener('click', () => setSettingsOpen(false));
 $('settingsReset').addEventListener('click', () => {
   Object.assign(settings, DEFAULTS);
   buildSettings();
+  buildAdjust();
   for (const key of Object.keys(DEFAULTS)) onSettingChanged(key);
 });
 
+function buildAdjust() {
+  const body = $('adjustBody');
+  body.textContent = '';
+  buildSliders(body, ADJUST);
+}
+
+const adjustPanel = $('adjustPanel');
+$('adjustToggle').addEventListener('click', () => {
+  adjustPanel.hidden = !adjustPanel.hidden;
+  $('adjustToggle').setAttribute('aria-expanded', String(!adjustPanel.hidden));
+});
+
 buildSettings();
+buildAdjust();
 video.classList.toggle('preview', settings.showPreview);
