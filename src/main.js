@@ -12,6 +12,7 @@ import {
 import { rotate, screenInWorld, generalizedPerspective } from './viewModel.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
+import { PhoneTracker } from './phoneTracker.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
 
 const NEAR = 0.005;
@@ -33,6 +34,7 @@ const DEFAULTS = {
   useIris: false,
   useOrientation: true,
   showPreview: false,
+  phoneTrackTest: false,
 };
 
 const SLIDERS = [
@@ -49,6 +51,7 @@ const TOGGLES = [
   { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
+  { key: 'phoneTrackTest', label: 'Phone tracking test (AlvaAR, loads 4 MB)' },
 ];
 
 const STORAGE_KEY = '3d-window-settings-v1';
@@ -158,9 +161,32 @@ function moveToward(p, target, k) {
   p.z += (target.z - p.z) * k;
 }
 
+// Experimental phone tracking (AlvaAR on the front camera). Readout only for now.
+let phoneTracker = null;
+
+function startPhoneTracker() {
+  if (phoneTracker || mode !== 'camera' || !tracker || !settings.phoneTrackTest) return;
+  const pt = new PhoneTracker(video);
+  phoneTracker = pt;
+  pt.canvas.className = 'alva-preview';
+  hud.appendChild(pt.canvas);
+  pt.init(settings.fovDeg).catch((err) => {
+    console.error(err);
+    pt.status = `failed: ${err.message || err}`;
+  });
+}
+
+function stopPhoneTracker() {
+  if (!phoneTracker) return;
+  phoneTracker.canvas.remove();
+  phoneTracker = null;
+}
+
 // Face tracking → eye in the screen frame.
 function updateTracking(t, nowMs) {
   const r = tracker ? tracker.detect(nowMs) : undefined;
+  // A new video frame arrived (r is null when it has no face).
+  if (r !== undefined && phoneTracker) phoneTracker.update(r ? r.box : null);
   if (r) {
     const cal = calibration();
     const iris = { px: irisDiameterPx(r.irises, r.videoW, r.videoH), m: IRIS_DIAMETER_M };
@@ -279,6 +305,12 @@ function renderDebug() {
     const d = distStats;
     lines.push(`dist cm  eyes ${d.eyes.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
+    if (phoneTracker) {
+      const pt = phoneTracker;
+      const pos = pt.position ? pt.position.map((v) => v.toFixed(2).padStart(6)).join(' ') : '–';
+      lines.push(`phone track ${pt.status}  pts ${pt.points}  ${pt.ms.toFixed(0)} ms`);
+      lines.push(`phone track pos ${pos} (AlvaAR units)`);
+    }
   }
   debugEl.textContent = lines.join('\n');
 }
@@ -320,6 +352,7 @@ $('start').addEventListener('click', () => {
       const ft = new FaceTracker(video);
       await ft.init();
       tracker = ft;
+      startPhoneTracker();
     })
     .catch((err) => {
       console.error(err);
@@ -407,6 +440,7 @@ function onSettingChanged(key) {
   if (key === 'smoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
+  if (key === 'phoneTrackTest') settings.phoneTrackTest ? startPhoneTracker() : stopPhoneTracker();
   saveSettings();
 }
 

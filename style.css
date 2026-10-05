@@ -144,6 +144,16 @@ button:active { transform: scale(0.97); }
 }
 #debug:empty { display: none; }
 
+.alva-preview {
+  position: absolute;
+  left: calc(10px + env(safe-area-inset-left));
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  width: 108px;
+  height: auto;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
 #adjust {
   position: absolute;
   top: calc(10px + env(safe-area-inset-top));
