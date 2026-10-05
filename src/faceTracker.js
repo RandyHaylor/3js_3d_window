@@ -7,6 +7,7 @@ const WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
+// Iris centers, each followed by its 4 boundary landmarks (469–472, 474–477).
 const IRIS_A = 468;
 const IRIS_B = 473;
 
@@ -39,7 +40,7 @@ export class FaceTracker {
       runningMode: 'VIDEO',
       numFaces: 1,
       outputFaceBlendshapes: false,
-      outputFacialTransformationMatrixes: false,
+      outputFacialTransformationMatrixes: true,
     });
     try {
       this.landmarker = await FaceLandmarker.createFromOptions(fileset, opts('GPU'));
@@ -52,14 +53,22 @@ export class FaceTracker {
   }
 
   // Returns undefined when there is no new video frame, null when no face is found,
-  // otherwise { a, b, videoW, videoH } with the two iris-center landmarks.
+  // otherwise { a, b, irises, faceMatrix, videoW, videoH }: the two iris centers, each
+  // iris's 4 boundary landmarks, and the metric (cm) face transform as a flat array.
   detect(nowMs) {
     const v = this.video;
     if (!this.landmarker || v.readyState < 2 || v.currentTime === this.lastVideoTime) return undefined;
     this.lastVideoTime = v.currentTime;
     const res = this.landmarker.detectForVideo(v, nowMs);
     const lm = res.faceLandmarks?.[0];
-    if (!lm || lm.length <= IRIS_B) return null;
-    return { a: lm[IRIS_A], b: lm[IRIS_B], videoW: v.videoWidth, videoH: v.videoHeight };
+    if (!lm || lm.length <= IRIS_B + 4) return null;
+    return {
+      a: lm[IRIS_A],
+      b: lm[IRIS_B],
+      irises: [lm.slice(IRIS_A + 1, IRIS_A + 5), lm.slice(IRIS_B + 1, IRIS_B + 5)],
+      faceMatrix: res.facialTransformationMatrixes?.[0]?.data ?? null,
+      videoW: v.videoWidth,
+      videoH: v.videoHeight,
+    };
   }
 }

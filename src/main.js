@@ -1,6 +1,15 @@
 import * as THREE from 'three';
 import { createScene } from './scene.js';
-import { offAxisFrustum, screenSizeMeters, eyeFromIris, approach } from './windowMath.js';
+import {
+  offAxisFrustum,
+  screenSizeMeters,
+  eyeFromIris,
+  knownCssPpi,
+  irisDiameterPx,
+  matrixTranslation,
+  IRIS_DIAMETER_M,
+  approach,
+} from './windowMath.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
@@ -15,7 +24,7 @@ const IS_PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.widt
 // ---------- settings ----------
 
 const DEFAULTS = {
-  pxPerInch: IS_PHONE ? 153 : 96,
+  pxPerInch: knownCssPpi(screen.width, screen.height, devicePixelRatio) ?? (IS_PHONE ? 153 : 96),
   ipdMm: 63,
   fovDeg: 70,
   camOffsetMm: 5,
@@ -23,6 +32,7 @@ const DEFAULTS = {
   worldScale: 1,
   smoothing: 1,
   flipX: false,
+  useIris: false,
   useOrientation: true,
   showPreview: false,
 };
@@ -41,6 +51,7 @@ const ADJUST = [
 ];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
+  { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
 ];
@@ -115,6 +126,23 @@ applySmoothing();
 
 const track = { lastSeen: -Infinity, lost: true, blendUntil: 0, filtered: null, ipdPx: 0 };
 
+// Running mean and jitter (std dev) of a raw signal, for comparing distance sources.
+class Jitter {
+  mean = 0;
+  vari = 0;
+  n = 0;
+  add(v) {
+    const a = this.n++ < 10 ? 1 / this.n : 0.1;
+    const d = v - this.mean;
+    this.mean += a * d;
+    this.vari += a * (d * d * (1 - a) - this.vari);
+  }
+  text() {
+    return this.n ? `${(this.mean * 100).toFixed(1)}±${(Math.sqrt(this.vari) * 100).toFixed(1)}` : '–';
+  }
+}
+const distStats = { eyes: new Jitter(), iris: new Jitter(), face: new Jitter() };
+
 const calibration = () => ({
   ipdM: settings.ipdMm / 1000,
   fovLongDeg: settings.fovDeg,
@@ -132,7 +160,18 @@ function moveToward(p, target, k) {
 function updateTracking(t, nowMs, dt) {
   const r = tracker ? tracker.detect(nowMs) : undefined;
   if (r) {
-    const e = eyeFromIris(r.a, r.b, r.videoW, r.videoH, calibration(), screenM.h);
+    const cal = calibration();
+    const iris = { px: irisDiameterPx(r.irises, r.videoW, r.videoH), m: IRIS_DIAMETER_M };
+    const e = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h, settings.useIris ? iris : null);
+
+    // Raw distances from each source (before Depth scaling), for the debug comparison.
+    const raw = { ...cal, depthScale: 1 };
+    const byEyes = eyeFromIris(r.a, r.b, r.videoW, r.videoH, raw, screenM.h);
+    const byIris = eyeFromIris(r.a, r.b, r.videoW, r.videoH, raw, screenM.h, iris);
+    if (byEyes) distStats.eyes.add(byEyes.z);
+    if (byIris) distStats.iris.add(byIris.z);
+    if (r.faceMatrix) distStats.face.add(Math.abs(matrixTranslation(r.faceMatrix)[2]) / 100);
+
     if (e) {
       if (track.lost) {
         filter.reset();
@@ -211,7 +250,12 @@ function renderDebug() {
     `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm   ${fps.toFixed(0)} fps`,
     `orientation: ${orientState}`,
   ];
-  if (mode === 'camera') lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  ipd ${track.ipdPx.toFixed(1)} px`);
+  if (mode === 'camera') {
+    lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  ipd ${track.ipdPx.toFixed(1)} px`);
+    const d = distStats;
+    lines.push(`dist cm  eyes ${d.eyes.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
+    lines.push(`using ${settings.useIris ? 'iris' : 'eyes'}   ${settings.pxPerInch.toFixed(1)} css px/in`);
+  }
   debugEl.textContent = lines.join('\n');
 }
 
