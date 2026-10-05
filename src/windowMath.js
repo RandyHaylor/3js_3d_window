@@ -1,6 +1,22 @@
 // Pure math for the "screen as a window" effect. No Three.js imports so it can
 // be unit-tested under node.
 
+const MIN_EYE_Z = 0.05; // meters; keeps the frustum finite if tracking misbehaves
+
+// Off-axis frustum bounds at the near plane for a screen of size w×h (meters)
+// centered at the origin in the z=0 plane, viewed from eye {x,y,z} (z > 0).
+export function offAxisFrustum(eye, w, h, near) {
+  const ez = Math.max(eye.z, MIN_EYE_Z);
+  const k = near / ez;
+  return {
+    left: (-w / 2 - eye.x) * k,
+    right: (w / 2 - eye.x) * k,
+    bottom: (-h / 2 - eye.y) * k,
+    top: (h / 2 - eye.y) * k,
+    eyeZ: ez,
+  };
+}
+
 // Physical screen size in meters from CSS pixel size and CSS px per inch.
 export function screenSizeMeters(cssW, cssH, cssPxPerInch) {
   const m = 0.0254 / cssPxPerInch;
@@ -59,7 +75,7 @@ export function matrixTranslation(d) {
 // Convert iris-center landmarks to an eye-midpoint position in the screen frame.
 //   left, right : {x, y, z} normalized MediaPipe landmarks (468 / 473)
 //   videoW/H    : video frame size in px
-//   cal         : { ipdM, fovLongDeg, camOffsetM, flipX }
+//   cal         : { ipdM, fovLongDeg, camOffsetM, flipX, depthScale }
 //   screenH     : physical screen height in meters (camera sits above the top edge)
 //   ref         : optional { px, m } size reference used for distance instead of eye spacing
 export function eyeFromIris(left, right, videoW, videoH, cal, screenH, ref = null) {
@@ -81,7 +97,10 @@ export function eyeFromIris(left, right, videoW, videoH, cal, screenH, ref = nul
   const sx = cal.flipX ? 1 : -1;
   const x = (sx * (u - videoW / 2) * dist) / f;
   const y = (-(v - videoH / 2) * dist) / f + screenH / 2 + cal.camOffsetM;
-  return { x, y, z: dist, ipdPx };
+  // depthScale only scales distance: that stretches the scene's depth uniformly,
+  // while scaling x/y with it would make depth stretch more as the viewer leans in.
+  const z = dist * cal.depthScale;
+  return { x, y, z, ipdPx };
 }
 
 export const lerp = (a, b, t) => a + (b - a) * t;
