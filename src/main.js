@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { createScene } from './scene.js';
 import {
-  offAxisFrustum,
   screenSizeMeters,
   eyeFromIris,
   knownCssPpi,
@@ -10,14 +9,14 @@ import {
   IRIS_DIAMETER_M,
   approach,
 } from './windowMath.js';
+import { rotate, screenInWorld, generalizedPerspective } from './viewModel.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
 
 const NEAR = 0.005;
 const FAR = 6;
-const LOST_AFTER = 0.25; // s without a face before showing "Face lost"
-const DRIFT_AFTER = 2.0; // s lost before easing back to the neutral eye
+const LOST_AFTER = 0.25; // s without a face before the view is blanked
 
 const IS_PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
 
@@ -28,7 +27,6 @@ const DEFAULTS = {
   ipdMm: 63,
   fovDeg: 70,
   camOffsetMm: 5,
-  depthScale: 1,
   worldScale: 1,
   smoothing: 1,
   flipX: false,
@@ -40,15 +38,12 @@ const DEFAULTS = {
 const SLIDERS = [
   { key: 'pxPerInch', label: 'Screen density', unit: 'css px/in', min: 70, max: 220, step: 1, hint: 'Sets the physical size of the window.' },
   { key: 'ipdMm', label: 'Eye spacing (IPD)', unit: 'mm', min: 50, max: 76, step: 0.5 },
-  { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the z readout against a ruler.' },
+  { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the distance readout against a ruler.' },
   { key: 'camOffsetMm', label: 'Camera above screen top', unit: 'mm', min: -20, max: 30, step: 0.5 },
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
 ];
 // Quick-access sliders in the top-corner Adjust drawer.
-const ADJUST = [
-  { key: 'depthScale', label: 'Depth', unit: '×', min: 0.3, max: 3, step: 0.01 },
-  { key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 },
-];
+const ADJUST = [{ key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 }];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
   { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
@@ -96,8 +91,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const { scene, setWorldScale } = createScene();
 const camera = new THREE.PerspectiveCamera();
-const rig = new THREE.Object3D(); // the phone: screen at its origin, +z toward the viewer
-const targetQ = new THREE.Quaternion();
+camera.matrixAutoUpdate = true;
 
 let screenM = { w: 0.07, h: 0.15 };
 function resize() {
@@ -114,9 +108,17 @@ let tracker = null;
 const orient = new OrientationTracker();
 let orientState = 'off';
 
+// The eye in the SCREEN frame (meters): what face tracking measures.
 const neutralEye = () => ({ x: 0, y: 0, z: IS_PHONE ? 0.33 : 0.6 });
-const eye = neutralEye(); // the eye position actually used for rendering
+const eye = neutralEye();
 const simEye = neutralEye();
+
+// The eye in the WORLD frame: the anchor everything is built from. Set when the eye is
+// first seen and on Center. Phone movement isn't sensed, so the head is held still here
+// and the phone's world position is derived from it.
+let eyeAnchor = null;
+const phoneQ = new THREE.Quaternion();
+const view = { phoneW: [0, 0, 0], d: 0 }; // for the debug readout
 
 const filter = new Vec3Filter();
 function applySmoothing() {
@@ -124,7 +126,7 @@ function applySmoothing() {
 }
 applySmoothing();
 
-const track = { lastSeen: -Infinity, lost: true, blendUntil: 0, filtered: null, ipdPx: 0 };
+const track = { lastSeen: -Infinity, lost: true, ipdPx: 0 };
 
 // Running mean and jitter (std dev) of a raw signal, for comparing distance sources.
 class Jitter {
@@ -148,7 +150,6 @@ const calibration = () => ({
   fovLongDeg: settings.fovDeg,
   camOffsetM: settings.camOffsetMm / 1000,
   flipX: settings.flipX,
-  depthScale: settings.depthScale,
 });
 
 function moveToward(p, target, k) {
@@ -157,58 +158,74 @@ function moveToward(p, target, k) {
   p.z += (target.z - p.z) * k;
 }
 
-function updateTracking(t, nowMs, dt) {
+// Face tracking → eye in the screen frame.
+function updateTracking(t, nowMs) {
   const r = tracker ? tracker.detect(nowMs) : undefined;
   if (r) {
     const cal = calibration();
     const iris = { px: irisDiameterPx(r.irises, r.videoW, r.videoH), m: IRIS_DIAMETER_M };
-    const e = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h, settings.useIris ? iris : null);
-
-    // Raw distances from each source (before Depth scaling), for the debug comparison.
-    const raw = { ...cal, depthScale: 1 };
-    const byEyes = eyeFromIris(r.a, r.b, r.videoW, r.videoH, raw, screenM.h);
-    const byIris = eyeFromIris(r.a, r.b, r.videoW, r.videoH, raw, screenM.h, iris);
+    const byEyes = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h);
+    const byIris = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h, iris);
     if (byEyes) distStats.eyes.add(byEyes.z);
     if (byIris) distStats.iris.add(byIris.z);
     if (r.faceMatrix) distStats.face.add(Math.abs(matrixTranslation(r.faceMatrix)[2]) / 100);
 
+    const e = settings.useIris ? byIris : byEyes;
     if (e) {
       if (track.lost) {
         filter.reset();
-        track.blendUntil = t + 0.5;
         track.lost = false;
       }
       track.lastSeen = t;
       track.ipdPx = e.ipdPx;
-      track.filtered = filter.filter(e, t);
+      Object.assign(eye, filter.filter(e, t));
     }
   }
-
-  const since = t - track.lastSeen;
-  if (since > LOST_AFTER) track.lost = true;
-
-  if (!track.lost && track.filtered) {
-    if (t < track.blendUntil) moveToward(eye, track.filtered, approach(dt, 0.12));
-    else Object.assign(eye, track.filtered);
-  } else if (since > DRIFT_AFTER) {
-    moveToward(eye, neutralEye(), approach(dt, 1.5));
-  } // else: hold the last position
+  if (t - track.lastSeen > LOST_AFTER) track.lost = true;
 
   if (!tracker) setStatus('Loading face model…');
-  else if (track.lost) setStatus('Face lost: hold steady', 'warn');
+  else if (track.lost) setStatus('No eyes detected', 'warn');
   else setStatus('Tracking', 'ok');
 }
 
-function updateCamera(dt) {
-  if (settings.useOrientation) orient.relative(targetQ);
-  else targetQ.identity();
-  rig.quaternion.slerp(targetQ, approach(dt, 0.04));
+// Eye-first camera: anchor eye in the world → screen placement → rays from the eye
+// through the screen corners (generalized perspective projection).
+const basis = new THREE.Matrix4();
+const vr = new THREE.Vector3();
+const vu = new THREE.Vector3();
+const vn = new THREE.Vector3();
 
-  const f = offAxisFrustum(eye, screenM.w, screenM.h, NEAR);
-  camera.projectionMatrix.makePerspective(f.left, f.right, f.top, f.bottom, NEAR, FAR);
+function updateCamera() {
+  if (settings.useOrientation) orient.relative(phoneQ);
+  else phoneQ.identity();
+
+  const eyeS = [eye.x, eye.y, eye.z];
+  // Handheld (rotation data present): the head is the steady thing, so the eye stays
+  // anchored and the phone's placement is derived from it. Fixed monitor (no rotation
+  // data): the screen is the steady thing, so it stays at the origin and the eye moves.
+  const handheld = settings.useOrientation && orient.hasData;
+  if (!eyeAnchor || !handheld) eyeAnchor = rotate(phoneQ, eyeS);
+
+  const s = screenInWorld(eyeAnchor, phoneQ, eyeS, screenM.w, screenM.h);
+  const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR);
+  if (!(p.d > 0.02)) return false; // eye at or behind the screen plane
+
+  camera.projectionMatrix.makePerspective(p.left, p.right, p.top, p.bottom, NEAR, FAR);
   camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-  camera.position.set(eye.x, eye.y, f.eyeZ).applyQuaternion(rig.quaternion).add(rig.position);
-  camera.quaternion.copy(rig.quaternion);
+  basis.makeBasis(vr.fromArray(p.vr), vu.fromArray(p.vu), vn.fromArray(p.vn));
+  camera.quaternion.setFromRotationMatrix(basis);
+  camera.position.fromArray(eyeAnchor);
+
+  view.phoneW = s.center;
+  view.d = p.d;
+  return true;
+}
+
+function recenter() {
+  orient.center();
+  if (settings.useOrientation) orient.relative(phoneQ);
+  else phoneQ.identity();
+  eyeAnchor = rotate(phoneQ, [eye.x, eye.y, eye.z]); // phone back at the world origin
 }
 
 // ---------- loop ----------
@@ -223,12 +240,14 @@ renderer.setAnimationLoop((nowMs) => {
   lastT = t;
   fps += (1 / dt - fps) * 0.05;
 
-  if (mode === 'camera') updateTracking(t, nowMs, dt);
+  if (mode === 'camera') updateTracking(t, nowMs);
   else if (mode === 'sim') moveToward(eye, simEye, approach(dt, 0.05));
 
+  // Without the eye there is nothing meaningful to show.
+  const hasEye = mode !== 'camera' || (tracker && !track.lost);
   setWorldScale(settings.worldScale);
-  updateCamera(dt);
-  renderer.render(scene, camera);
+  if (hasEye && updateCamera()) renderer.render(scene, camera);
+  else renderer.clear();
 
   if (mode !== 'idle' && t - lastDebug > 0.25) {
     lastDebug = t;
@@ -243,18 +262,23 @@ function setStatus(text, kind = '') {
   statusEl.className = 'pill' + (kind ? ' ' + kind : '');
 }
 
+const euler = new THREE.Euler();
 function renderDebug() {
   const cm = (v) => (v * 100).toFixed(1).padStart(6);
+  const deg = (r) => ((r * 180) / Math.PI).toFixed(0).padStart(4);
+  const offAxis = Math.atan2(Math.hypot(eye.x, eye.y), eye.z);
+  euler.setFromQuaternion(phoneQ, 'YXZ');
+  const pw = view.phoneW;
   const lines = [
-    `eye  x${cm(eye.x)}  y${cm(eye.y)}  z${cm(eye.z)} cm`,
-    `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm   ${fps.toFixed(0)} fps`,
-    `orientation: ${orientState}`,
+    `eye→screen  x${cm(eye.x)} y${cm(eye.y)} z${cm(eye.z)} cm  ${deg(offAxis)}° off-axis`,
+    `phone rot   yaw${deg(euler.y)} pitch${deg(euler.x)} roll${deg(euler.z)}°  (${orientState})`,
+    `phone pos   x${cm(pw[0])} y${cm(pw[1])} z${cm(pw[2])} cm (world)`,
+    `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm  ${settings.pxPerInch.toFixed(1)} px/in  ${fps.toFixed(0)} fps`,
   ];
   if (mode === 'camera') {
-    lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  ipd ${track.ipdPx.toFixed(1)} px`);
     const d = distStats;
     lines.push(`dist cm  eyes ${d.eyes.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
-    lines.push(`using ${settings.useIris ? 'iris' : 'eyes'}   ${settings.pxPerInch.toFixed(1)} css px/in`);
+    lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
   }
   debugEl.textContent = lines.join('\n');
 }
@@ -287,6 +311,7 @@ $('start').addEventListener('click', () => {
     : Promise.reject(new Error('Camera API unavailable (needs HTTPS and a supported browser).'));
   errorEl.hidden = true;
   mode = 'camera';
+  eyeAnchor = null;
   showHud();
   setStatus('Starting camera…');
   cam
@@ -306,6 +331,7 @@ $('simulate').addEventListener('click', () => {
   startOrientation();
   errorEl.hidden = true;
   mode = 'sim';
+  eyeAnchor = null;
   showHud();
   setStatus('Simulated eye');
 });
@@ -329,7 +355,7 @@ canvas.addEventListener(
 );
 
 centerBtn.addEventListener('click', () => {
-  orient.center();
+  recenter();
   centerBtn.textContent = 'Recenter';
 });
 
@@ -380,6 +406,7 @@ function onSettingChanged(key) {
   if (key === 'pxPerInch') resize();
   if (key === 'smoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
+  if (key === 'useOrientation') recenter();
   saveSettings();
 }
 
