@@ -6,6 +6,7 @@
 const ALVA_URL =
   'https://cdn.jsdelivr.net/gh/alanross/AlvaAR@7796af500ee92001ac2a9888363ff64d7a3bee75/dist/alva_ar.js';
 const FACE_PAD = 0.25; // grow the face box by this fraction on each side before masking
+const TORSO_PAD = 1.1; // shoulders: extend the mask this many face-widths to each side
 
 export class PhoneTracker {
   // maxSide: processing resolution (long side, px).
@@ -18,6 +19,8 @@ export class PhoneTracker {
     this.status = 'loading';
     this.points = 0;
     this.position = null; // [x, y, z] in AlvaAR units
+    this.pose = null; // latest raw 4×4 pose while tracking
+    this.resets = 0; // AlvaAR map resets; a new map has a new origin and scale
     this.ms = 0;
   }
 
@@ -47,15 +50,16 @@ export class PhoneTracker {
 
     ctx.drawImage(this.video, 0, 0, w, h);
     if (faceBox) {
+      // Blank the viewer: head plus shoulders/torso down to the bottom of the frame, so
+      // only the room is tracked (points on the viewer move with them, not the room).
       const bw = faceBox.x1 - faceBox.x0;
       const bh = faceBox.y1 - faceBox.y0;
       ctx.fillStyle = '#808080';
-      ctx.fillRect(
-        (faceBox.x0 - bw * FACE_PAD) * w,
-        (faceBox.y0 - bh * FACE_PAD) * h,
-        bw * (1 + 2 * FACE_PAD) * w,
-        bh * (1 + 2 * FACE_PAD) * h
-      );
+      const headX0 = faceBox.x0 - bw * FACE_PAD;
+      const headY0 = faceBox.y0 - bh * FACE_PAD;
+      ctx.fillRect(headX0 * w, headY0 * h, bw * (1 + 2 * FACE_PAD) * w, h);
+      const torsoY0 = faceBox.y1;
+      ctx.fillRect((faceBox.x0 - bw * TORSO_PAD) * w, torsoY0 * h, bw * (1 + 2 * TORSO_PAD) * w, h);
     }
     const frame = ctx.getImageData(0, 0, w, h);
 
@@ -63,12 +67,15 @@ export class PhoneTracker {
     alva.memImg.write(frame.data);
     const code = alva.system.findCameraPose(alva.memImg.heap.byteOffset, alva.memCam.ptr);
     if (code === 1) {
-      const pose = alva.memCam.read(16);
+      // Copy out of the WASM heap; layout documented in AlvaAR's findCameraPose.
+      this.pose = Array.from(alva.memCam.read(16));
       // Same axis convention as AlvaAR's Three.js connector.
-      this.position = [pose[12], -pose[13], -pose[14]];
+      this.position = [this.pose[12], -this.pose[13], -this.pose[14]];
       this.status = 'tracking';
     } else {
+      this.pose = null;
       this.status = code === 2 ? 'reset' : 'initializing';
+      if (code === 2) this.resets++;
     }
 
     this.ms = performance.now() - t0;
@@ -95,5 +102,7 @@ export class PhoneTracker {
   reset() {
     if (this.alva) this.alva.reset();
     this.position = null;
+    this.pose = null;
+    this.resets++;
   }
 }

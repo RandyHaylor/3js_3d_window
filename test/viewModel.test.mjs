@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rotate, screenInWorld, generalizedPerspective, IDENTITY } from '../src/viewModel.js';
+import {
+  rotate,
+  screenInWorld,
+  generalizedPerspective,
+  IDENTITY,
+  qmul,
+  CAM_IN_SCREEN,
+  screenPoseFromCamera,
+  relativePose,
+  screenFromPose,
+} from '../src/viewModel.js';
 
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
 const nearV = (a, b, eps = 1e-9) => a.forEach((v, i) => near(v, b[i], eps));
@@ -50,6 +60,47 @@ test('rays from the eye pass through the physical screen corners', () => {
   assert.ok(p.d > 0);
 });
 
+test('screen pose is recovered from the tracked front-camera pose', () => {
+  // A screen yawed 30° with its center at P; the camera sits 8 cm above the center.
+  const qS = yaw(30);
+  const P = [0.2, -0.1, 0.5];
+  const camOffset = [0, 0.08, 0];
+  const k = 0.25; // meters per tracker unit
+  const qCam = qmul(qS, CAM_IN_SCREEN);
+  const tCam = add3(P, rotate(qS, camOffset)).map((v) => v / k);
+
+  const pose = screenPoseFromCamera(qCam, tCam, k, camOffset);
+  nearV(pose.p, P);
+  nearV(rotate(pose.q, [1, 0, 0]), rotate(qS, [1, 0, 0]));
+  nearV(rotate(pose.q, [0, 0, 1]), rotate(qS, [0, 0, 1]));
+});
+
+test('the front camera looks toward the viewer (+z of the screen)', () => {
+  // A Three.js-style camera looks down its −z; for the front camera that is screen +z.
+  nearV(rotate(CAM_IN_SCREEN, [0, 0, -1]), [0, 0, 1]);
+  nearV(rotate(CAM_IN_SCREEN, [1, 0, 0]), [-1, 0, 0]); // image right = screen left
+});
+
+test('recentering makes the reference pose the origin and moves others with it', () => {
+  const ref = { q: yaw(40), p: [1, 2, 3] };
+  const later = { q: qmul(yaw(40), yaw(10)), p: add3([1, 2, 3], rotate(yaw(40), [0.3, 0, 0])) };
+  const r0 = relativePose(ref, ref);
+  nearV(r0.p, [0, 0, 0]);
+  nearV(rotate(r0.q, [1, 0, 0]), [1, 0, 0]);
+  const r1 = relativePose(ref, later);
+  nearV(r1.p, [0.3, 0, 0]); // moved 30 cm along the phone's own x
+  nearV(rotate(r1.q, [1, 0, 0]), rotate(yaw(10), [1, 0, 0]));
+});
+
+test('screen corners follow the screen pose', () => {
+  const s = screenFromPose([0, 0, 0], IDENTITY, W, H);
+  nearV(s.pa, [-W / 2, -H / 2, 0]);
+  nearV(s.pc, [-W / 2, H / 2, 0]);
+});
+
+function add3(a, b) {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
 function sub3(a, b) {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }

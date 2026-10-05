@@ -9,7 +9,14 @@ import {
   IRIS_DIAMETER_M,
   approach,
 } from './windowMath.js';
-import { rotate, screenInWorld, generalizedPerspective } from './viewModel.js';
+import {
+  rotate,
+  screenInWorld,
+  generalizedPerspective,
+  screenPoseFromCamera,
+  relativePose,
+  screenFromPose,
+} from './viewModel.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
 import { PhoneTracker } from './phoneTracker.js';
@@ -35,6 +42,7 @@ const DEFAULTS = {
   useOrientation: true,
   showPreview: false,
   phoneTrackTest: false,
+  alvaScale: 0.1,
 };
 
 const SLIDERS = [
@@ -45,13 +53,24 @@ const SLIDERS = [
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
 ];
 // Quick-access sliders in the top-corner Adjust drawer.
-const ADJUST = [{ key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 }];
+const ADJUST = [
+  { key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 },
+  {
+    key: 'alvaScale',
+    label: 'Motion scale',
+    unit: 'm/unit',
+    min: 0.005,
+    max: 1,
+    step: 0.005,
+    hint: 'Phone tracking: move the phone a measured distance and match the readout.',
+  },
+];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
   { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
-  { key: 'phoneTrackTest', label: 'Phone tracking test (AlvaAR, loads 4 MB)' },
+  { key: 'phoneTrackTest', label: 'Phone tracking (AlvaAR, loads 4 MB): drives the view while tracking' },
 ];
 
 const STORAGE_KEY = '3d-window-settings-v1';
@@ -121,7 +140,7 @@ const simEye = neutralEye();
 // and the phone's world position is derived from it.
 let eyeAnchor = null;
 const phoneQ = new THREE.Quaternion();
-const view = { phoneW: [0, 0, 0], d: 0 }; // for the debug readout
+const view = { phoneW: [0, 0, 0], d: 0, source: '' }; // for the debug readout
 
 const filter = new Vec3Filter();
 function applySmoothing() {
@@ -221,18 +240,60 @@ const vr = new THREE.Vector3();
 const vu = new THREE.Vector3();
 const vn = new THREE.Vector3();
 
+// Phone pose measured by AlvaAR (front camera), as a Three.js-style camera pose using
+// the same conversion as AlvaAR's own Three.js connector.
+const alvaM = new THREE.Matrix4();
+const alvaQ = new THREE.Quaternion();
+let alvaRef = null; // raw camera pose at Recenter; the screen pose there becomes the origin
+let alvaResets = 0;
+
+function alvaCameraPose(pose) {
+  alvaM.fromArray(pose);
+  alvaQ.setFromRotationMatrix(alvaM);
+  return { q: { x: -alvaQ.x, y: alvaQ.y, z: alvaQ.z, w: alvaQ.w }, t: [pose[12], -pose[13], -pose[14]] };
+}
+
+// Screen pose in our world (meters, relative to the Recenter pose) from AlvaAR, or null.
+function measuredPhonePose() {
+  const pt = phoneTracker;
+  if (!pt || pt.status !== 'tracking' || !pt.pose) return null;
+  if (pt.resets !== alvaResets) {
+    alvaResets = pt.resets; // new map: new origin and scale
+    alvaRef = null;
+  }
+  const cam = alvaCameraPose(pt.pose);
+  if (!alvaRef) alvaRef = cam;
+  const camOffset = [0, screenM.h / 2 + settings.camOffsetMm / 1000, 0];
+  const ref = screenPoseFromCamera(alvaRef.q, alvaRef.t, settings.alvaScale, camOffset);
+  const now = screenPoseFromCamera(cam.q, cam.t, settings.alvaScale, camOffset);
+  return relativePose(ref, now);
+}
+
 function updateCamera() {
+  const eyeS = [eye.x, eye.y, eye.z];
+  let s;
   if (settings.useOrientation) orient.relative(phoneQ);
   else phoneQ.identity();
 
-  const eyeS = [eye.x, eye.y, eye.z];
-  // Handheld (rotation data present): the head is the steady thing, so the eye stays
-  // anchored and the phone's placement is derived from it. Fixed monitor (no rotation
-  // data): the screen is the steady thing, so it stays at the origin and the eye moves.
-  const handheld = settings.useOrientation && orient.hasData;
-  if (!eyeAnchor || !handheld) eyeAnchor = rotate(phoneQ, eyeS);
+  const measured = measuredPhonePose();
+  if (measured) {
+    // Measured phone pose: the screen's corners are where the phone really is, and the
+    // eye is placed from the phone by face tracking. Nothing is assumed to stay still.
+    s = screenFromPose(measured.p, measured.q, screenM.w, screenM.h);
+    const e = rotate(measured.q, eyeS);
+    eyeAnchor = [s.center[0] + e[0], s.center[1] + e[1], s.center[2] + e[2]];
+    view.source = 'AlvaAR';
+    view.measuredQ = measured.q;
+  } else {
+    // Handheld (rotation data present): the head is the steady thing, so the eye stays
+    // anchored and the phone's placement is derived from it. Fixed monitor (no rotation
+    // data): the screen is the steady thing, so it stays at the origin and the eye moves.
+    const handheld = settings.useOrientation && orient.hasData;
+    if (!eyeAnchor || !handheld) eyeAnchor = rotate(phoneQ, eyeS);
+    s = screenInWorld(eyeAnchor, phoneQ, eyeS, screenM.w, screenM.h);
+    view.source = handheld ? 'head held still' : 'fixed screen';
+  }
 
-  const s = screenInWorld(eyeAnchor, phoneQ, eyeS, screenM.w, screenM.h);
   const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR);
   if (!(p.d > 0.02)) return false; // eye at or behind the screen plane
 
@@ -252,6 +313,7 @@ function recenter() {
   if (settings.useOrientation) orient.relative(phoneQ);
   else phoneQ.identity();
   eyeAnchor = rotate(phoneQ, [eye.x, eye.y, eye.z]); // phone back at the world origin
+  alvaRef = null; // measured phone pose: the current pose becomes the origin
 }
 
 // ---------- loop ----------
@@ -298,13 +360,19 @@ function renderDebug() {
   const lines = [
     `eye→screen  x${cm(eye.x)} y${cm(eye.y)} z${cm(eye.z)} cm  ${deg(offAxis)}° off-axis`,
     `phone rot   yaw${deg(euler.y)} pitch${deg(euler.x)} roll${deg(euler.z)}°  (${orientState})`,
-    `phone pos   x${cm(pw[0])} y${cm(pw[1])} z${cm(pw[2])} cm (world)`,
+    `phone pos   x${cm(pw[0])} y${cm(pw[1])} z${cm(pw[2])} cm  [${view.source}]`,
     `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm  ${settings.pxPerInch.toFixed(1)} px/in  ${fps.toFixed(0)} fps`,
   ];
   if (mode === 'camera') {
     const d = distStats;
     lines.push(`dist cm  eyes ${d.eyes.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
+    if (phoneTracker && view.source === 'AlvaAR') {
+      // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
+      const mq = view.measuredQ;
+      euler.setFromQuaternion(new THREE.Quaternion(mq.x, mq.y, mq.z, mq.w), 'YXZ');
+      lines.push(`alva rot    yaw${deg(euler.y)} pitch${deg(euler.x)} roll${deg(euler.z)}°  (vs phone rot)`);
+    }
     if (phoneTracker) {
       const pt = phoneTracker;
       const pos = pt.position ? pt.position.map((v) => v.toFixed(2).padStart(6)).join(' ') : '–';
