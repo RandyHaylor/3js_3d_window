@@ -1,0 +1,8 @@
+{
+  "name": "3js_3d_window",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

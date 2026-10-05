@@ -1,0 +1,54 @@
+PHONE AS A 3D WINDOW — HIGH-LEVEL DEMO PLAN
+
+Goal
+Create a single website with a fixed 3D scene that feels like looking through
+the phone screen into another space. The viewpoint responds to the viewer's
+eye position relative to the screen and to the phone's orientation.
+
+Hosting and platform
+- Store the website and its assets in a GitHub repository and host on GitHub Pages.
+- Target iPhone Safari first, served over HTTPS.
+- Run tracking and rendering locally in the browser; no video uploads or backend.
+- Use Three.js for rendering and MediaPipe Face Landmarker for face tracking.
+
+Scene
+- Build one stationary room with a floor grid, a foreground object, and objects
+  farther behind it, making changes in perspective and occlusion easy to see.
+- Keep the scene simple so tracking and rendering can run smoothly together.
+
+Viewing behavior
+- Use the front camera to estimate the midpoint between the viewer's eyes,
+  including lateral position, vertical position, and approximate distance.
+- Treat the display as a physical window using an off-axis perspective.
+- Moving the head sideways or vertically reveals different parts of the scene.
+- Moving closer or farther changes the view through the same screen opening.
+- Combine that screen-relative viewpoint with phone orientation so tilting or
+  turning the phone changes the direction of the window into the virtual world.
+- Smooth estimates enough to reduce jitter without making movement feel delayed.
+
+User flow
+1. Open the URL and tap Start.
+2. Grant camera access and, where required, motion/orientation access.
+3. Hold the phone comfortably and tap Center to establish a starting view.
+4. Move the head and phone to explore the fixed scene.
+5. Provide a Recenter button and a brief indication when tracking is lost.
+
+Calibration and limits
+- Start with approximate eye spacing, camera field of view, display dimensions,
+  and camera-to-screen offset; allow a simple scale adjustment if needed.
+- Face landmarks are estimates, not directly measured metric eye positions.
+  Validate the position conversion and depth estimate on an actual iPhone.
+- The initial demo uses eye position; gaze direction is a separate future feature.
+- Orientation sensors provide rotation. Full phone translation in world space
+  would require additional tracking and is outside this initial demo.
+
+Build sequence
+1. Render the scene and verify the window projection with simulated eye movement.
+2. Add front-camera tracking and approximate eye-position calibration.
+3. Add phone orientation, recentering, and tracking-loss handling.
+4. Publish to GitHub Pages and test performance, permissions, and movement on iPhone.
+
+Success criteria
+One URL opens the demo without installation. Head movement produces clear,
+stable parallax; phone rotation changes viewing direction; the scene remains
+responsive, and loss of tracking causes no abrupt camera jumps.
