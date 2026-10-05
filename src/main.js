@@ -4,11 +4,15 @@ import {
   screenSizeMeters,
   eyeFromIris,
   knownCssPpi,
+  knownFrontCameraFov,
+  fovForMeasuredDistance,
+  screenModelKey,
   irisDiameterPx,
   matrixTranslation,
   IRIS_DIAMETER_M,
   approach,
 } from './windowMath.js';
+import { MotionScaleEstimator, fitEyeCorrection } from './calibration.js';
 import {
   rotate,
   screenInWorld,
@@ -33,7 +37,7 @@ const IS_PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.widt
 const DEFAULTS = {
   pxPerInch: knownCssPpi(screen.width, screen.height, devicePixelRatio) ?? (IS_PHONE ? 153 : 96),
   ipdMm: 63,
-  fovDeg: 70,
+  fovDeg: knownFrontCameraFov(screen.width, screen.height, devicePixelRatio) ?? 70,
   camOffsetMm: 5,
   worldScale: 1,
   smoothing: 1,
@@ -41,8 +45,10 @@ const DEFAULTS = {
   useIris: false,
   useOrientation: true,
   showPreview: false,
-  phoneTrackTest: false,
-  alvaScale: 0.1,
+  phoneTracking: true,
+  // Automatic eye-position corrections (see calibration.js), kept between visits.
+  eyeLateral: 1,
+  eyeDepth: 1,
 };
 
 const SLIDERS = [
@@ -53,24 +59,13 @@ const SLIDERS = [
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
 ];
 // Quick-access sliders in the top-corner Adjust drawer.
-const ADJUST = [
-  { key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 },
-  {
-    key: 'alvaScale',
-    label: 'Motion scale',
-    unit: 'm/unit',
-    min: 0.005,
-    max: 1,
-    step: 0.005,
-    hint: 'Phone tracking: move the phone a measured distance and match the readout.',
-  },
-];
+const ADJUST = [{ key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 }];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
   { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
-  { key: 'phoneTrackTest', label: 'Phone tracking (AlvaAR, loads 4 MB): drives the view while tracking' },
+  { key: 'phoneTracking', label: 'Phone tracking (AlvaAR room tracking)' },
 ];
 
 const STORAGE_KEY = '3d-window-settings-v1';
@@ -167,6 +162,58 @@ class Jitter {
 }
 const distStats = { eyes: new Jitter(), iris: new Jitter(), face: new Jitter() };
 
+// ---------- automatic calibration (calibration.js) ----------
+
+// Meters per AlvaAR unit, from AlvaAR's motion vs. the accelerometer.
+const motionScale = new MotionScaleEstimator();
+addEventListener('devicemotion', (e) => {
+  const a = e.acceleration; // without gravity, m/s²
+  if (a && a.x !== null) motionScale.addImu([a.x, a.y, a.z], performance.now() / 1000);
+});
+
+// Face-tracked eye before the automatic correction (screen frame, meters).
+const eyeRaw = neutralEye();
+const camInScreen = () => [0, screenM.h / 2 + settings.camOffsetMm / 1000, 0];
+
+// Apply the eye correction: lateral offsets and distance from the camera are rescaled.
+function correctEye(raw) {
+  const c = camInScreen();
+  return {
+    x: c[0] + (raw.x - c[0]) * settings.eyeLateral,
+    y: c[1] + (raw.y - c[1]) * settings.eyeLateral,
+    z: c[2] + (raw.z - c[2]) * settings.eyeDepth,
+  };
+}
+
+const eyeFit = { samples: [], lastT: 0, last: null };
+const EYE_FIT_WINDOW = 90; // samples (~3 s)
+
+// Collect samples while the phone pose is measured; refit the eye correction every half
+// second when the phone has moved enough to constrain it.
+function updateEyeCorrection(measured, t) {
+  const c = camInScreen();
+  const s = eyeFit.samples;
+  s.push({ p: measured.p, q: measured.q, u: [eyeRaw.x - c[0], eyeRaw.y - c[1], eyeRaw.z - c[2]], c });
+  if (s.length > EYE_FIT_WINDOW) s.shift();
+  if (t - eyeFit.lastT < 0.5 || s.length < EYE_FIT_WINDOW / 2) return;
+  eyeFit.lastT = t;
+
+  const spread = [0, 1, 2].map((i) => Math.max(...s.map((x) => x.p[i])) - Math.min(...s.map((x) => x.p[i])));
+  if (Math.max(...spread) < 0.04) return; // phone hasn't moved enough
+  const fit = fitEyeCorrection(s);
+  eyeFit.last = fit;
+  // Reject fits that don't explain the motion (e.g. the head moved too).
+  if (!fit || fit.rms > 0.015 || fit.lateral < 0.6 || fit.lateral > 1.6 || fit.depth < 0.6 || fit.depth > 1.6) return;
+  settings.eyeLateral += (fit.lateral - settings.eyeLateral) * 0.2;
+  settings.eyeDepth += (fit.depth - settings.eyeDepth) * 0.2;
+  saveSettings();
+}
+
+function resetCalibration() {
+  motionScale.reset();
+  eyeFit.samples.length = 0;
+}
+
 const calibration = () => ({
   ipdM: settings.ipdMm / 1000,
   fovLongDeg: settings.fovDeg,
@@ -180,11 +227,12 @@ function moveToward(p, target, k) {
   p.z += (target.z - p.z) * k;
 }
 
-// Experimental phone tracking (AlvaAR on the front camera). Readout only for now.
+// Phone tracking: AlvaAR on the front camera measures the phone's pose in the room.
 let phoneTracker = null;
+let seenResets = 0;
 
 function startPhoneTracker() {
-  if (phoneTracker || mode !== 'camera' || !tracker || !settings.phoneTrackTest) return;
+  if (phoneTracker || mode !== 'camera' || !tracker || !settings.phoneTracking) return;
   const pt = new PhoneTracker(video);
   phoneTracker = pt;
   pt.canvas.className = 'alva-preview';
@@ -205,7 +253,15 @@ function stopPhoneTracker() {
 function updateTracking(t, nowMs) {
   const r = tracker ? tracker.detect(nowMs) : undefined;
   // A new video frame arrived (r is null when it has no face).
-  if (r !== undefined && phoneTracker) phoneTracker.update(r ? r.box : null);
+  if (r !== undefined && phoneTracker) {
+    const pt = phoneTracker;
+    pt.update(r ? r.box : null);
+    if (pt.resets !== seenResets) {
+      seenResets = pt.resets; // new map: new origin and new scale
+      resetCalibration();
+    }
+    if (pt.status === 'tracking' && pt.position) motionScale.addPosition(pt.position, performance.now() / 1000);
+  }
   if (r) {
     const cal = calibration();
     const iris = { px: irisDiameterPx(r.irises, r.videoW, r.videoH), m: IRIS_DIAMETER_M };
@@ -223,13 +279,17 @@ function updateTracking(t, nowMs) {
       }
       track.lastSeen = t;
       track.ipdPx = e.ipdPx;
-      Object.assign(eye, filter.filter(e, t));
+      Object.assign(eyeRaw, filter.filter(e, t));
+      Object.assign(eye, correctEye(eyeRaw));
     }
   }
   if (t - track.lastSeen > LOST_AFTER) track.lost = true;
 
+  const pt = phoneTracker;
   if (!tracker) setStatus('Loading face model…');
   else if (track.lost) setStatus('No eyes detected', 'warn');
+  else if (pt && pt.status !== 'tracking') setStatus('Finding the room: move the phone slowly');
+  else if (pt && motionScale.scale === null) setStatus('Calibrating: move the phone around gently');
   else setStatus('Tracking', 'ok');
 }
 
@@ -256,20 +316,20 @@ function alvaCameraPose(pose) {
 // Screen pose in our world (meters, relative to the Recenter pose) from AlvaAR, or null.
 function measuredPhonePose() {
   const pt = phoneTracker;
-  if (!pt || pt.status !== 'tracking' || !pt.pose) return null;
+  const k = motionScale.scale; // meters per AlvaAR unit; null until calibrated
+  if (!pt || pt.status !== 'tracking' || !pt.pose || k === null) return null;
   if (pt.resets !== alvaResets) {
     alvaResets = pt.resets; // new map: new origin and scale
     alvaRef = null;
   }
   const cam = alvaCameraPose(pt.pose);
   if (!alvaRef) alvaRef = cam;
-  const camOffset = [0, screenM.h / 2 + settings.camOffsetMm / 1000, 0];
-  const ref = screenPoseFromCamera(alvaRef.q, alvaRef.t, settings.alvaScale, camOffset);
-  const now = screenPoseFromCamera(cam.q, cam.t, settings.alvaScale, camOffset);
+  const ref = screenPoseFromCamera(alvaRef.q, alvaRef.t, k, camInScreen());
+  const now = screenPoseFromCamera(cam.q, cam.t, k, camInScreen());
   return relativePose(ref, now);
 }
 
-function updateCamera() {
+function updateCamera(t) {
   const eyeS = [eye.x, eye.y, eye.z];
   let s;
   if (settings.useOrientation) orient.relative(phoneQ);
@@ -284,6 +344,7 @@ function updateCamera() {
     eyeAnchor = [s.center[0] + e[0], s.center[1] + e[1], s.center[2] + e[2]];
     view.source = 'AlvaAR';
     view.measuredQ = measured.q;
+    if (!track.lost) updateEyeCorrection(measured, t);
   } else {
     // Handheld (rotation data present): the head is the steady thing, so the eye stays
     // anchored and the phone's placement is derived from it. Fixed monitor (no rotation
@@ -334,7 +395,7 @@ renderer.setAnimationLoop((nowMs) => {
   // Without the eye there is nothing meaningful to show.
   const hasEye = mode !== 'camera' || (tracker && !track.lost);
   setWorldScale(settings.worldScale);
-  if (hasEye && updateCamera()) renderer.render(scene, camera);
+  if (hasEye && updateCamera(t)) renderer.render(scene, camera);
   else renderer.clear();
 
   if (mode !== 'idle' && t - lastDebug > 0.25) {
@@ -378,6 +439,11 @@ function renderDebug() {
       const pos = pt.position ? pt.position.map((v) => v.toFixed(2).padStart(6)).join(' ') : '–';
       lines.push(`phone track ${pt.status}  pts ${pt.points}  ${pt.ms.toFixed(0)} ms`);
       lines.push(`phone track pos ${pos} (AlvaAR units)`);
+      const k = motionScale.scale;
+      lines.push(`motion scale ${k === null ? 'calibrating' : k.toFixed(3) + ' m/unit'}  (${motionScale.pairs} samples)`);
+      const f = eyeFit.last;
+      const fitText = f ? `last fit ${f.lateral.toFixed(2)}/${f.depth.toFixed(2)} rms ${(f.rms * 100).toFixed(1)} cm` : 'no fit yet';
+      lines.push(`eye corr    lateral ${settings.eyeLateral.toFixed(2)} depth ${settings.eyeDepth.toFixed(2)}  ${fitText}`);
     }
   }
   debugEl.textContent = lines.join('\n');
@@ -400,7 +466,7 @@ function startOrientation() {
   // requestPermission must be called synchronously inside the tap handler on iOS.
   requestOrientationPermission().then((r) => {
     orientState = r;
-    if (r === 'granted') orient.start();
+    orient.start(); // harmless if access was denied: no events arrive
   });
 }
 
@@ -501,6 +567,32 @@ function buildSettings() {
     });
     body.appendChild(row);
   }
+
+  // Developer tool: measure this model's front-camera FOV once, for the table in windowMath.js.
+  const dev = document.createElement('div');
+  dev.className = 'setting';
+  dev.innerHTML =
+    '<button type="button">Measure camera FOV (developer)</button>' +
+    '<span class="hint">Hold your eyes a measured distance from the screen, then tap.</span>';
+  dev.querySelector('button').addEventListener('click', measureCameraFov);
+  body.appendChild(dev);
+}
+
+function measureCameraFov() {
+  if (mode !== 'camera' || track.lost) {
+    alert('Start the camera and keep your face in view first.');
+    return;
+  }
+  const answer = prompt('Distance from your eyes to the screen, in cm:', '40');
+  const trueDist = parseFloat(answer) / 100;
+  if (!(trueDist > 0.05)) return;
+  const fov = fovForMeasuredDistance(settings.fovDeg, eyeRaw.z, trueDist);
+  settings.fovDeg = Math.round(fov * 10) / 10;
+  settings.eyeDepth = 1; // the FOV now accounts for distance
+  saveSettings();
+  buildSettings();
+  const key = screenModelKey(screen.width, screen.height, devicePixelRatio);
+  alert(`Camera FOV set to ${settings.fovDeg}°.\nFor the per-model table: '${key}': ${settings.fovDeg},`);
 }
 
 function onSettingChanged(key) {
@@ -508,7 +600,7 @@ function onSettingChanged(key) {
   if (key === 'smoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
-  if (key === 'phoneTrackTest') settings.phoneTrackTest ? startPhoneTracker() : stopPhoneTracker();
+  if (key === 'phoneTracking') settings.phoneTracking ? startPhoneTracker() : stopPhoneTracker();
   saveSettings();
 }
 

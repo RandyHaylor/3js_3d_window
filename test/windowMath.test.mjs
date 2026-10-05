@@ -4,6 +4,7 @@ import {
   screenSizeMeters,
   eyeFromIris,
   knownCssPpi,
+  fovForMeasuredDistance,
   irisDiameterPx,
   matrixTranslation,
   IRIS_DIAMETER_M,
@@ -52,6 +53,14 @@ test('face matrix translation is read in either flattening order', () => {
   const rowMajor = [1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, -40, 0, 0, 0, 1];
   assert.deepEqual(matrixTranslation(colMajor), [2, 3, -40]);
   assert.deepEqual(matrixTranslation(rowMajor), [2, 3, -40]);
+});
+
+test('measured distance gives the field of view that reproduces it', () => {
+  // With 90° the eye reads 0.32 m; if the truth is 0.40 m, the new FOV must read 0.40 m.
+  const fov = fovForMeasuredDistance(90, 0.32, 0.4);
+  const cal = { ...CAL, fovLongDeg: fov };
+  const eye = eyeFromIris({ x: 0.45, y: 0.5, z: 0 }, { x: 0.55, y: 0.5, z: 0 }, 640, 480, cal, 0);
+  near(eye.z, 0.4, 1e-9);
 });
 
 test('viewer moving toward image-left maps to screen +x', () => {

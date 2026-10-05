@@ -16,13 +16,16 @@ function screenAngle() {
   return typeof window.orientation === 'number' ? window.orientation : 0;
 }
 
-// Must be called synchronously from a user gesture on iOS.
+// Asks for motion-sensor access (rotation and acceleration). Must be called
+// synchronously from a user gesture on iOS.
 export function requestOrientationPermission() {
-  const DOE = window.DeviceOrientationEvent;
-  if (DOE && typeof DOE.requestPermission === 'function') {
-    return DOE.requestPermission().catch(() => 'denied');
-  }
-  return Promise.resolve(DOE ? 'granted' : 'unsupported');
+  const ask = (E) =>
+    E && typeof E.requestPermission === 'function'
+      ? E.requestPermission().catch(() => 'denied')
+      : Promise.resolve(E ? 'granted' : 'unsupported');
+  return Promise.all([ask(window.DeviceOrientationEvent), ask(window.DeviceMotionEvent)]).then(([o, m]) =>
+    o === 'granted' && m === 'granted' ? 'granted' : `orientation ${o}, motion ${m}`
+  );
 }
 
 export class OrientationTracker {

@@ -25,10 +25,32 @@ const IPHONE_CSS_PPI = {
   '440x956@3': 460 / 3, // 16/17 Pro Max
 };
 
+// Key identifying the device by its portrait CSS screen size and pixel ratio.
+export function screenModelKey(screenW, screenH, dpr) {
+  return `${Math.min(screenW, screenH)}x${Math.max(screenW, screenH)}@${Math.round(dpr)}`;
+}
+
 // CSS px per inch for a known iPhone, or null.
 export function knownCssPpi(screenW, screenH, dpr) {
-  const w = Math.min(screenW, screenH), h = Math.max(screenW, screenH);
-  return IPHONE_CSS_PPI[`${w}x${h}@${Math.round(dpr)}`] ?? null;
+  return IPHONE_CSS_PPI[screenModelKey(screenW, screenH, dpr)] ?? null;
+}
+
+// Front-camera field of view (degrees, long side of the video Safari delivers), measured
+// once per model with Settings → "Measure camera FOV" at a known distance. Keyed like
+// IPHONE_CSS_PPI. The automatic calibration refines this per session.
+const FRONT_CAMERA_FOV = {
+  // '390x844@3': 0, // add measured values here
+};
+
+export function knownFrontCameraFov(screenW, screenH, dpr) {
+  return FRONT_CAMERA_FOV[screenModelKey(screenW, screenH, dpr)] ?? null;
+}
+
+// Field of view that makes a measured distance come out right: the face-tracked distance
+// scales with the focal length, i.e. with 1 / tan(fov / 2).
+export function fovForMeasuredDistance(currentFovDeg, estimatedDist, trueDist) {
+  const t = Math.tan((currentFovDeg * Math.PI) / 360) * (estimatedDist / trueDist);
+  return (Math.atan(t) * 360) / Math.PI;
 }
 
 // Human iris diameter is nearly constant: 11.7 ± 0.5 mm (MediaPipe Iris).
