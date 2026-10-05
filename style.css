@@ -148,9 +148,10 @@ button:active { transform: scale(0.97); }
   position: absolute;
   left: calc(10px + env(safe-area-inset-left));
   bottom: calc(72px + env(safe-area-inset-bottom));
-  width: 108px;
+  width: min(45vw, 240px);
   height: auto;
   border-radius: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
   pointer-events: none;
 }
 

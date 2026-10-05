@@ -71,12 +71,25 @@ export class PhoneTracker {
       this.status = code === 2 ? 'reset' : 'initializing';
     }
 
+    this.ms = performance.now() - t0;
+
+    // Visual feedback on the preview (drawn after the frame was handed to AlvaAR).
     const pts = alva.getFramePoints();
     this.points = pts.length;
-    ctx.fillStyle = this.status === 'tracking' ? '#3fd6a0' : '#ffffff';
-    for (const p of pts) ctx.fillRect(p.x - 1, p.y - 1, 3, 3);
-
-    this.ms = performance.now() - t0;
+    const tracking = this.status === 'tracking';
+    const dot = Math.max(4, Math.round(w / 60));
+    ctx.fillStyle = tracking ? '#3fd6a0' : '#ff4d6d';
+    for (const p of pts) ctx.fillRect(p.x - dot / 2, p.y - dot / 2, dot, dot);
+    const font = Math.round(w / 12);
+    ctx.font = `bold ${font}px sans-serif`;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, w, font * 3.7);
+    ctx.fillStyle = tracking ? '#3fd6a0' : '#ffb35c';
+    ctx.fillText(this.status.toUpperCase(), font * 0.4, font * 1.1);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`${this.points} pts  ${Math.round(this.ms)} ms`, font * 0.4, font * 2.2);
+    const pos = this.position ? this.position.map((v) => v.toFixed(2)).join(' ') : '–';
+    ctx.fillText(`pos ${pos}`, font * 0.4, font * 3.3);
   }
 
   reset() {
