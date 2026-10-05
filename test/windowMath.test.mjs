@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { offAxisFrustum, screenSizeMeters, eyeFromIris, lockDepth } from '../src/windowMath.js';
+import { offAxisFrustum, screenSizeMeters, eyeFromIris } from '../src/windowMath.js';
 
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
 
@@ -37,12 +37,4 @@ test('viewer moving toward image-left maps to screen +x', () => {
   const cal = { ipdM: 0.064, fovLongDeg: 90, camOffsetM: 0, flipX: false, depthScale: 1 };
   const eye = eyeFromIris({ x: 0.35, y: 0.5, z: 0 }, { x: 0.45, y: 0.5, z: 0 }, 640, 480, cal, 0);
   assert.ok(eye.x > 0);
-});
-
-test('locking depth keeps distance fixed and preserves direction from the camera', () => {
-  const camY = 0.08;
-  const locked = lockDepth({ x: 0.1, y: camY + 0.05, z: 0.3 }, 0.6, camY);
-  near(locked.z, 0.6);
-  near(locked.x, 0.2); // same angle, twice the distance
-  near(locked.y, camY + 0.1);
 });

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { createScene } from './scene.js';
-import { offAxisFrustum, screenSizeMeters, eyeFromIris, lockDepth, approach } from './windowMath.js';
+import { offAxisFrustum, screenSizeMeters, eyeFromIris, approach } from './windowMath.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
@@ -100,10 +100,7 @@ let tracker = null;
 const orient = new OrientationTracker();
 let orientState = 'off';
 
-// Rendering uses a fixed eye distance (no depth stretch when leaning in/out).
-// Center replaces it with the viewer's measured distance.
-let lockedZ = IS_PHONE ? 0.33 : 0.6;
-const neutralEye = () => ({ x: 0, y: 0, z: lockedZ });
+const neutralEye = () => ({ x: 0, y: 0, z: IS_PHONE ? 0.33 : 0.6 });
 const eye = neutralEye(); // the eye position actually used for rendering
 const simEye = neutralEye();
 
@@ -113,7 +110,7 @@ function applySmoothing() {
 }
 applySmoothing();
 
-const track = { lastSeen: -Infinity, lost: true, blendUntil: 0, filtered: null, measuredZ: 0, ipdPx: 0 };
+const track = { lastSeen: -Infinity, lost: true, blendUntil: 0, filtered: null, ipdPx: 0 };
 
 const calibration = () => ({
   ipdM: settings.ipdMm / 1000,
@@ -141,9 +138,7 @@ function updateTracking(t, nowMs, dt) {
       }
       track.lastSeen = t;
       track.ipdPx = e.ipdPx;
-      const smoothed = filter.filter(e, t);
-      track.measuredZ = smoothed.z;
-      track.filtered = lockDepth(smoothed, lockedZ, screenM.h / 2 + settings.camOffsetMm / 1000);
+      track.filtered = filter.filter(e, t);
     }
   }
 
@@ -213,10 +208,7 @@ function renderDebug() {
     `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm   ${fps.toFixed(0)} fps`,
     `orientation: ${orientState}`,
   ];
-  if (mode === 'camera') {
-    lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  ipd ${track.ipdPx.toFixed(1)} px`);
-    lines.push(`measured z ${cm(track.measuredZ)} cm (locked at ${cm(lockedZ)})`);
-  }
+  if (mode === 'camera') lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  ipd ${track.ipdPx.toFixed(1)} px`);
   debugEl.textContent = lines.join('\n');
 }
 
@@ -271,7 +263,7 @@ $('simulate').addEventListener('click', () => {
   setStatus('Simulated eye: drag or move the pointer');
 });
 
-// Simulated eye: pointer position over the screen (distance stays locked).
+// Simulated eye: pointer position over the screen, wheel for distance.
 canvas.addEventListener('pointermove', (e) => {
   if (mode !== 'sim') return;
   const nx = (e.clientX / innerWidth) * 2 - 1;
@@ -279,13 +271,18 @@ canvas.addEventListener('pointermove', (e) => {
   simEye.x = nx * screenM.w * 1.5;
   simEye.y = -ny * screenM.h * 1.5;
 });
+canvas.addEventListener(
+  'wheel',
+  (e) => {
+    if (mode !== 'sim') return;
+    e.preventDefault();
+    simEye.z = Math.min(1.5, Math.max(0.1, simEye.z * Math.exp(e.deltaY * 0.001)));
+  },
+  { passive: false }
+);
 
 centerBtn.addEventListener('click', () => {
   orient.center();
-  if (mode === 'camera' && !track.lost && track.measuredZ > 0) {
-    lockedZ = track.measuredZ;
-    track.blendUntil = performance.now() / 1000 + 0.5; // ease into the new distance
-  }
   centerBtn.textContent = 'Recenter';
 });
 
