@@ -13,105 +13,69 @@
 
 import { rotate } from './viewModel.js';
 
-// Compared quantity: the change in average velocity between two consecutive tracker frame
-// intervals. From the tracker: (p2−p1)/h2 − (p1−p0)/h1. From the accelerometer: the
-// acceleration integrated over both intervals with a triangular weight (0 → 1 → 0). The two
-// are equal for any frame spacing, so this works at low camera frame rates too.
-const MIN_DV = 0.05; // m/s, only compare windows with clear motion
-const MAX_GAP = 0.6; // s between tracker frames; longer is a dropout
-const SPAN = 0.15; // s, minimum spacing of the three frames compared (tracker jitter matters less)
-const MIN_PAIRS = 20;
-export const MIN_SCALE_PAIRS = MIN_PAIRS;
+// Face scale: meters per AlvaAR unit, with the face as the size reference. Face tracking
+// measures the eye relative to the phone in meters (iris size). The eye's world position is
+//   eye = k·a + c
+// where k·a is the phone's AlvaAR position (a in AlvaAR units, k meters per unit) and c is
+// everything already in meters (the camera-offset part of the phone's pose plus the eye
+// relative to the phone, placed by the phone's rotation). With the head still, eye is
+// constant, so the k that keeps k·a + c steadiest over the last WINDOW seconds is the scale
+// (least squares: k = −Σ(a−ā)·(c−c̄) / Σ|a−ā|²).
+// It only measures when the phone moves relative to the head (c varies by MIN_C_RMS), and
+// only accepts fits that explain the motion (the eye stays within MAX_RMS, and well under
+// how much c moved). Walking with the phone steady in front of the face gives nothing to
+// measure, so it waits rather than guess.
+const WINDOW = 2.5; // s
+const MIN_SAMPLES = 15;
+const MIN_C_RMS = 0.015; // m: phone moved relative to the head
+const MAX_RMS = 0.012; // m: how still the fitted eye must stay
+const KEEP = 9; // accepted fits; the scale is their median
 
-// Estimates meters per tracker unit from tracker positions and accelerometer readings.
-export class MotionScaleEstimator {
+export class FaceScaleEstimator {
   constructor() {
     this.reset();
   }
 
+  // A new AlvaAR map has a new unit: start over.
   reset() {
-    this.imu = []; // recent accelerometer samples { t, a }
-    this.frames = []; // recent tracker samples { t, p }, contiguous (no dropouts)
-    this.sumIV = 0;
-    this.sumVV = 0;
-    this.pairs = 0;
-    // Diagnostics: how many accelerometer samples / comparison windows were seen, and why
-    // windows were rejected.
-    this.diag = { imuSamples: 0, positions: 0, windows: 0, noImuCoverage: 0, tooLittleMotion: 0 };
+    this.samples = [];
+    this.fits = [];
+    this.scale = null;
+    this.last = null; // latest fit attempt, for diagnostics
   }
 
-  // Accelerometer reading without gravity (m/s², any frame), time in seconds.
-  addImu(acc, t) {
-    this.diag.imuSamples++;
-    this.imu.push({ t, a: acc });
-    while (this.imu.length && this.imu[0].t < t - 3) this.imu.shift();
-  }
-
-  // Tracker position (tracker units), time in seconds.
-  addPosition(p, t) {
-    this.diag.positions++;
-    const f = this.frames;
-    if (f.length && (t - f[f.length - 1].t > MAX_GAP || t <= f[f.length - 1].t)) f.length = 0;
-    f.push({ t, p });
-    while (f.length && f[0].t < t - 2) f.shift();
-    // Newest frame, plus the latest frames at least SPAN before it and before that.
-    const f2 = f[f.length - 1];
-    let f1 = null;
-    let f0 = null;
-    for (let i = f.length - 2; i >= 0; i--) {
-      if (!f1) {
-        if (f[i].t <= f2.t - SPAN) f1 = f[i];
-      } else if (f[i].t <= f1.t - SPAN) {
-        f0 = f[i];
-        break;
+  // a: the phone's AlvaAR position (units), c: the meters part (see above), t: seconds.
+  add(a, c, t) {
+    const s = this.samples;
+    s.push({ a, c, t });
+    while (s.length && s[0].t < t - WINDOW) s.shift();
+    if (s.length < MIN_SAMPLES) return;
+    const n = s.length;
+    const am = [0, 1, 2].map((i) => s.reduce((v, x) => v + x.a[i], 0) / n);
+    const cm = [0, 1, 2].map((i) => s.reduce((v, x) => v + x.c[i], 0) / n);
+    let saa = 0;
+    let sac = 0;
+    let scc = 0;
+    for (const x of s) {
+      for (let i = 0; i < 3; i++) {
+        const da = x.a[i] - am[i];
+        const dc = x.c[i] - cm[i];
+        saa += da * da;
+        sac += da * dc;
+        scc += dc * dc;
       }
     }
-    if (f0) this.pair(f0, f1, f2);
-  }
-
-  pair(f0, f1, f2) {
-    const h1 = f1.t - f0.t;
-    const h2 = f2.t - f1.t;
-    const dvVis = [0, 1, 2].map((i) => (f2.p[i] - f1.p[i]) / h2 - (f1.p[i] - f0.p[i]) / h1);
-    this.diag.windows++;
-    const dvImu = this.integrate(f0.t, f1.t, f2.t);
-    if (!dvImu) {
-      this.diag.noImuCoverage++;
-      return;
-    }
-    const imu = Math.hypot(...dvImu);
-    const vis = Math.hypot(...dvVis);
-    this.lastWindow = { t: f2.t, dvImu: imu, dvVis: vis };
-    if (imu < MIN_DV) {
-      this.diag.tooLittleMotion++;
-      return;
-    }
-    this.sumIV += imu * vis;
-    this.sumVV += vis * vis;
-    this.pairs++;
-  }
-
-  // ∫ a(τ)·k(τ) dτ over [t0, t2], k rising 0→1 on [t0, t1] and falling 1→0 on [t1, t2].
-  // Returns null if the accelerometer samples don't cover the window.
-  integrate(t0, t1, t2) {
-    const s = this.imu.filter((x) => x.t >= t0 - 0.02 && x.t <= t2 + 0.02);
-    if (s.length < 2 || s[0].t > t0 + 0.05 || s[s.length - 1].t < t2 - 0.05) return null;
-    const k = (tau) => (tau <= t1 ? (tau - t0) / (t1 - t0) : (t2 - tau) / (t2 - t1));
-    const out = [0, 0, 0];
-    for (let i = 1; i < s.length; i++) {
-      const a = Math.max(t0, s[i - 1].t);
-      const b = Math.min(t2, s[i].t);
-      if (b <= a) continue;
-      const mid = (a + b) / 2;
-      const w = Math.max(0, k(mid)) * (b - a);
-      for (let j = 0; j < 3; j++) out[j] += ((s[i - 1].a[j] + s[i].a[j]) / 2) * w;
-    }
-    return out;
-  }
-
-  // Meters per tracker unit, or null until enough motion has been seen.
-  get scale() {
-    return this.pairs >= MIN_PAIRS && this.sumVV > 0 ? this.sumIV / this.sumVV : null;
+    const cRms = Math.sqrt(scc / n);
+    if (cRms < MIN_C_RMS || saa <= 0) return void (this.last = { cRms });
+    const k = -sac / saa;
+    // Residual: how much the fitted eye still moves.
+    const rms = Math.sqrt(Math.max(0, (scc + 2 * k * sac + k * k * saa) / n));
+    this.last = { k, rms, cRms };
+    if (!(k > 0) || rms > MAX_RMS || rms > 0.3 * cRms) return;
+    this.fits.push(k);
+    if (this.fits.length > KEEP) this.fits.shift();
+    const sorted = [...this.fits].sort((x, y) => x - y);
+    this.scale = sorted[sorted.length >> 1];
   }
 }
 

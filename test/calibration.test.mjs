@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  MotionScaleEstimator,
+  FaceScaleEstimator,
   fitEyeCorrection,
   rawDistanceElasticity,
   angularSizeLimit,
@@ -19,75 +19,66 @@ const pitch = (deg) => {
 
 // Phone waved around: a few centimeters at about 1–2 Hz on each axis (meters).
 const wave = (t) => [0.08 * Math.sin(2 * Math.PI * 1.3 * t), 0.05 * Math.sin(2 * Math.PI * 1.7 * t + 1), 0.03 * Math.sin(2 * Math.PI * 1.1 * t + 2)];
-const waveAcc = (t) => [
-  -0.08 * (2 * Math.PI * 1.3) ** 2 * Math.sin(2 * Math.PI * 1.3 * t),
-  -0.05 * (2 * Math.PI * 1.7) ** 2 * Math.sin(2 * Math.PI * 1.7 * t + 1),
-  -0.03 * (2 * Math.PI * 1.1) ** 2 * Math.sin(2 * Math.PI * 1.1 * t + 2),
-];
 
-test('motion scale is recovered from tracker positions and the accelerometer', () => {
-  const metersPerUnit = 0.25;
-  const est = new MotionScaleEstimator();
-  const imuFrame = yaw(70); // accelerometer reports in a different frame: magnitudes still match
-  let tv = 0;
-  for (let t = 0; t < 6; t += 0.01) {
-    est.addImu(rotate(imuFrame, waveAcc(t)), t);
-    if (t >= tv) {
-      est.addPosition(wave(t).map((v) => v / metersPerUnit), t);
-      tv += 1 / 30;
-    }
+let seed = 1;
+const noise = () => {
+  // deterministic pseudo-random, roughly uniform in [-1, 1]
+  seed = (seed * 16807) % 2147483647;
+  return (seed / 2147483647) * 2 - 1;
+};
+
+// Feeds the face-scale estimator 30 fps samples for `seconds`: the phone at world position
+// phone(t) (meters), the eye at world position eye(t), AlvaAR reporting the phone in units
+// of `metersPerUnit`. Face tracking gives the eye relative to the phone (in meters, plus
+// `faceNoise`), placed in the world by the phone's rotation: c = eye − phone.
+function runFaceScale(est, { seconds, phone, eye, metersPerUnit = 0.26, faceNoise = 0 }) {
+  for (let i = 0; i <= seconds * 30; i++) {
+    const t = i / 30;
+    const p = phone(t);
+    const e = eye(t);
+    const a = p.map((v) => v / metersPerUnit);
+    const c = e.map((v, j) => v - p[j] + faceNoise * noise());
+    est.add(a, c, t);
   }
-  assert.ok(est.scale !== null, 'expected an estimate');
-  assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.1, `scale ${est.scale} vs ${metersPerUnit}`);
-});
-
-test('motion scale survives realistic tracker jitter', () => {
-  // Tracker positions jitter by ~2 mm (in meters) frame to frame, as visual tracking does.
-  const metersPerUnit = 0.25;
-  const est = new MotionScaleEstimator();
-  let seed = 1;
-  const noise = () => {
-    // deterministic pseudo-random, roughly uniform in [-1, 1]
-    seed = (seed * 16807) % 2147483647;
-    return (seed / 2147483647) * 2 - 1;
-  };
-  let tv = 0;
-  for (let t = 0; t < 10; t += 0.01) {
-    est.addImu(waveAcc(t), t);
-    if (t >= tv) {
-      const p = wave(t).map((v) => v + 0.002 * noise());
-      est.addPosition(p.map((v) => v / metersPerUnit), t);
-      tv += 1 / 30;
-    }
-  }
-  assert.ok(est.scale !== null, 'expected an estimate');
-  assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.15, `scale ${est.scale} vs ${metersPerUnit}`);
-});
-
-for (const fps of [10, 5, 3]) {
-  test(`motion scale still forms at a low camera frame rate (${fps} fps)`, () => {
-    const metersPerUnit = 0.25;
-    const est = new MotionScaleEstimator();
-    let tv = 0;
-    for (let t = 0; t < 20; t += 0.01) {
-      est.addImu(waveAcc(t), t);
-      if (t >= tv) {
-        est.addPosition(wave(t).map((v) => v / metersPerUnit), t);
-        tv += 1 / fps;
-      }
-    }
-    assert.ok(est.scale !== null, `no estimate at ${fps} fps (${est.pairs} pairs)`);
-    assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.1, `scale ${est.scale} at ${fps} fps`);
-  });
+  return est.scale;
 }
+const STILL_EYE = () => [0.02, 0.05, 0.35];
 
-test('no estimate while the phone is still', () => {
-  const est = new MotionScaleEstimator();
-  for (let t = 0; t < 3; t += 1 / 30) {
-    est.addImu([0, 0, 0], t);
-    est.addPosition([1, 2, 3], t);
-  }
-  assert.equal(est.scale, null);
+test('face scale: AlvaAR units → meters from a still head and a moving phone', () => {
+  const k = runFaceScale(new FaceScaleEstimator(), { seconds: 2.5, phone: wave, eye: STILL_EYE });
+  assert.ok(k !== null, 'expected an estimate');
+  assert.ok(Math.abs(k / 0.26 - 1) < 0.01, `scale ${k}`);
+});
+
+test('face scale survives face-tracking noise (±5 mm)', () => {
+  const k = runFaceScale(new FaceScaleEstimator(), { seconds: 2.5, phone: wave, eye: STILL_EYE, faceNoise: 0.005 });
+  assert.ok(k !== null, 'expected an estimate');
+  assert.ok(Math.abs(k / 0.26 - 1) < 0.1, `scale ${k}`);
+});
+
+test('face scale: walking with the phone steady in front of the face gives no estimate', () => {
+  // Head and phone move together at 1 m/s: nothing relates AlvaAR's units to the face.
+  const walk = (t) => [0.02 * Math.sin(t * 3), 0, -1 * t];
+  const k = runFaceScale(new FaceScaleEstimator(), {
+    seconds: 3,
+    phone: walk,
+    eye: (t) => walk(t).map((v, i) => v + STILL_EYE()[i]),
+  });
+  assert.equal(k, null);
+});
+
+test('face scale: a head moving on its own during the motion is rejected', () => {
+  const k = runFaceScale(new FaceScaleEstimator(), {
+    seconds: 2.5,
+    phone: wave,
+    eye: (t) => [0.02 + 0.12 * Math.sin(t * 2.3), 0.05, 0.35 + 0.08 * Math.sin(t * 1.7)],
+  });
+  assert.equal(k, null);
+});
+
+test('face scale: no estimate while the phone is still', () => {
+  const k = runFaceScale(new FaceScaleEstimator(), { seconds: 3, phone: () => [0, 0, 0], eye: STILL_EYE });
+  assert.equal(k, null);
 });
 
 // Samples of a phone waved and tilted in front of a still eye at E, with face tracking

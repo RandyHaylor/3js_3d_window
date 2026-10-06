@@ -13,8 +13,7 @@ import {
   approach,
 } from './windowMath.js';
 import {
-  MotionScaleEstimator,
-  MIN_SCALE_PAIRS,
+  FaceScaleEstimator,
   fitEyeCorrection,
   rawDistanceElasticity,
   angularSizeLimit,
@@ -51,7 +50,7 @@ const DEFAULTS = {
   smoothing: 4,
   rotationSmoothing: 4, // Hz, camera rotation (eye → phone direction)
   eyeWorldSmoothing: 1, // Hz, the eye's position in 3D space (plain low-pass)
-  alvaScale: null, // meters per AlvaAR unit, last measured (kept across map resets and visits)
+  faceScale: null, // meters per AlvaAR unit, last measured against the face (kept across map resets and visits)
   flipX: false,
   useIris: true, // iris diameter (11.7 mm) is the physical reference for eye scale
   autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
@@ -277,8 +276,8 @@ const distStats = { eyes: new Jitter(), eyes2d: new Jitter(), iris: new Jitter()
 
 // ---------- automatic calibration (calibration.js) ----------
 
-// Meters per AlvaAR unit, from AlvaAR's motion vs. the accelerometer.
-const motionScale = new MotionScaleEstimator();
+// Meters per AlvaAR unit, with the face (iris-measured eye distance) as the size reference.
+const faceScale = new FaceScaleEstimator();
 
 // How long before a camera frame's reported time it was really captured (timeline.js).
 const cameraDelay = new DelayEstimator();
@@ -312,7 +311,6 @@ addEventListener('devicemotion', (e) => {
   if (!a || a.x === null) return;
   const t = eventTime(e); // when it was measured
   phoneMotion.hasData = true;
-  motionScale.addImu([a.x, a.y, a.z], t);
   logImu(t, [a.x, a.y, a.z]);
   phoneMotion.acc += (Math.hypot(a.x, a.y, a.z) - phoneMotion.acc) * 0.3;
   if (phoneMotion.acc > MOVING_ACCEL) phoneMotion.lastMovingT = t;
@@ -387,19 +385,19 @@ function updateEyeCorrection(measured, t) {
 // A new AlvaAR map restarts the scale measurement, but the last scale found stays in use
 // (knownScale) until the new measurement completes.
 function resetCalibration() {
-  motionScale.reset();
+  faceScale.reset();
   eyeFit.samples.length = 0;
 }
 
 // Meters per AlvaAR unit: the current map's measurement, else the last one found (kept in
 // settings, so also across visits), else null (never measured).
 function knownScale() {
-  const k = motionScale.scale;
-  if (k !== null && (settings.alvaScale === null || Math.abs(k / settings.alvaScale - 1) > 0.01)) {
-    settings.alvaScale = k;
+  const k = faceScale.scale;
+  if (k !== null && (settings.faceScale === null || Math.abs(k / settings.faceScale - 1) > 0.01)) {
+    settings.faceScale = k;
     saveSettings();
   }
-  return k ?? settings.alvaScale;
+  return k ?? settings.faceScale;
 }
 
 const calibration = () => ({
@@ -458,7 +456,6 @@ function updateTracking(t, nowMs) {
       seenResets = pt.resets; // new map: new origin and new scale
       resetCalibration();
     }
-    if (pt.status === 'tracking' && pt.position) motionScale.addPosition(pt.position, tc);
   }
   let e = null; // this frame's eye measurement (phone frame), if the face was found
   if (fresh) {
@@ -471,8 +468,9 @@ function updateTracking(t, nowMs) {
       alvaPos: pt && pt.position ? pt.position.map((v) => +v.toFixed(4)) : null,
       pts: pt ? pt.points : 0,
       alvaMs: pt ? +pt.ms.toFixed(1) : 0,
-      pairs: motionScale.pairs,
-      scale: motionScale.scale,
+      fits: faceScale.fits.length,
+      scale: faceScale.scale,
+      scaleInUse: knownScale(),
       moving: phoneIsMoving() ? 1 : 0,
       phonePos: phonePos.map((v) => +v.toFixed(4)),
     });
@@ -519,7 +517,7 @@ function updateTracking(t, nowMs) {
   // One status line per part, so nothing hides anything else:
   //   Eyes  = face tracking sees the eyes
   //   Room  = AlvaAR has locked onto the room
-  //   Scale = AlvaAR units → meters, learned from moving the phone (n of required samples)
+  //   Scale = AlvaAR units → meters, measured against the face (✓ this map, last = earlier)
   const pt = phoneTracker;
   if (!tracker) {
     setStatus('Loading face model…');
@@ -528,11 +526,11 @@ function updateTracking(t, nowMs) {
     const room = !pt ? '' : pt.status === 'tracking' ? ' · Room ✓' : ' · Room …';
     const scale = !pt
       ? ''
-      : motionScale.scale !== null
+      : faceScale.scale !== null
         ? ' · Scale ✓'
         : knownScale() !== null
           ? ' · Scale (last)'
-          : ` · Scale ${Math.min(motionScale.pairs, MIN_SCALE_PAIRS)}/${MIN_SCALE_PAIRS}`;
+          : ' · Scale: sway the phone a little';
     const ready = !track.lost && (!pt || (pt.status === 'tracking' && knownScale() !== null));
     setStatus(eyes + room + scale, ready ? 'ok' : track.lost ? 'warn' : '');
   }
@@ -555,9 +553,10 @@ function alvaCameraPose(pose) {
 // Screen pose in our world (meters) from AlvaAR, or null. AlvaAR's motion is measured
 // from its reference pose and turned into the world by the phone's rotation at that
 // reference moment, so a new AlvaAR map doesn't change the world's axes.
-function measuredPhonePose(tc) {
+function measuredPhonePose(tc, k = knownScale()) {
+  // k: meters per AlvaAR unit (null if never measured). The position is linear in k:
+  // position(k) = k·a + b, which the face-scale measurement uses (k = 1 and k = 0).
   const pt = phoneTracker;
-  const k = knownScale(); // meters per AlvaAR unit; null if never measured
   if (!pt || pt.status !== 'tracking' || !pt.pose || k === null) return null;
   if (pt.resets !== alvaResets) {
     alvaResets = pt.resets; // new map: new origin and scale
@@ -619,6 +618,23 @@ function syncedUpdate(tc, e) {
   };
   if (!e) return hold('noFace', 'no face');
   const sensors = settings.useOrientation && orient.hasData;
+  const m = correctEye(e); // this frame's eye relative to the phone (meters)
+
+  // Face scale: this frame's AlvaAR position split into its AlvaAR-units part (a) and its
+  // meters part, plus the eye relative to the phone placed by the rotation at tc (c).
+  if (sensors && phoneTracker) {
+    const p1 = measuredPhonePose(tc, 1);
+    const p0 = measuredPhonePose(tc, 0);
+    if (p1 && p0) {
+      const eyeRel = rotate(phoneRotationAt(tc), [m.x, m.y, m.z]);
+      faceScale.add(
+        [0, 1, 2].map((i) => p1.p[i] - p0.p[i]),
+        [0, 1, 2].map((i) => p0.p[i] + eyeRel[i]),
+        tc
+      );
+    }
+  }
+
   let measured = null;
   // No scale ever found: the camera still follows the eye; the phone position stays put.
   const noScale = knownScale() === null;
@@ -634,7 +650,6 @@ function syncedUpdate(tc, e) {
     for (let i = 0; i < 3; i++) pos[i] += measured.p[i] - lastTrackedP[i];
   }
   // Candidate eye: this frame's measurement placed by that position and the rotation at tc.
-  const m = correctEye(e);
   const wp = eyeInWorld(pos, phoneRotationAt(tc), [m.x, m.y, m.z]);
   const eyeW = { x: wp[0], y: wp[1], z: wp[2] };
   if (!eyeGate.accept(eyeW, tc)) return hold('outlier', 'face outlier');
@@ -812,7 +827,7 @@ $('sendLog').addEventListener('click', async () => {
     camFps: camRate.fps,
     orientState,
     motionData: phoneMotion.hasData,
-    calibration: { pairs: motionScale.pairs, scale: motionScale.scale, diag: motionScale.diag, lastWindow: motionScale.lastWindow },
+    calibration: { scale: faceScale.scale, fits: faceScale.fits, last: faceScale.last, inUse: knownScale() },
     settings,
     frames: debugLog.frames,
     imu: debugLog.imu,
@@ -872,10 +887,18 @@ function renderDebug() {
       const pos = pt.position ? pt.position.map((v) => v.toFixed(2).padStart(6)).join(' ') : '–';
       lines.push(`phone track ${pt.status}  pts ${pt.points}  ${pt.ms.toFixed(0)} ms`);
       lines.push(`phone track pos ${pos} (AlvaAR units)`);
-      const k = motionScale.scale;
+      // Face scale: this map's measurement (fits accepted), the latest fit attempt, and the
+      // scale in use.
+      const k = faceScale.scale;
       const used = knownScale();
+      const la = faceScale.last;
+      const attempt = !la
+        ? 'no fit yet'
+        : la.k === undefined
+          ? `phone vs head moved ${(la.cRms * 100).toFixed(1)} cm (need 1.5)`
+          : `last fit ${la.k.toFixed(3)} rms ${(la.rms * 100).toFixed(1)} cm`;
       lines.push(
-        `motion scale ${k === null ? 'calibrating' : k.toFixed(3) + ' m/unit'}  (${motionScale.pairs} samples)  in use: ${
+        `face scale ${k === null ? 'measuring' : k.toFixed(3) + ' m/unit'} (${faceScale.fits.length} fits; ${attempt})  in use: ${
           used === null ? 'none (phone position held)' : used.toFixed(3) + (k === null ? ' (last found)' : '')
         }`
       );
