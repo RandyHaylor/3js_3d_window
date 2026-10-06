@@ -57,6 +57,7 @@ const DEFAULTS = {
   useOrientation: true,
   showPreview: false,
   phoneTracking: true,
+  maskViewer: true, // blank the viewer's head and torso out of AlvaAR's frames
   showStats: false, // stats drawer (top-left ▾)
   cameraSize: '640x480', // requested front-camera size; larger only if a camera crops at small sizes
   experience: 'room', // which scene is shown (scene.js EXPERIENCES)
@@ -117,6 +118,7 @@ const TOGGLES = [
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
   { key: 'phoneTracking', label: 'Phone tracking (AlvaAR room tracking)' },
+  { key: 'maskViewer', label: 'Mask the viewer out of room tracking (grey boxes)' },
   { key: 'autoEyeCal', label: 'Automatic eye correction (experimental; assumes a still head)' },];
 
 // v2: new defaults (iris scale, no automatic eye correction); v1 values are not carried over.
@@ -481,7 +483,7 @@ function updateTracking(t, nowMs) {
   // A new video frame arrived (r is null when it has no face).
   if (r !== undefined && phoneTracker) {
     const pt = phoneTracker;
-    pt.update();
+    pt.update(settings.maskViewer && r ? r.box : null);
     if (pt.resets !== seenResets) {
       seenResets = pt.resets; // new map: new origin and new scale
       resetCalibration();

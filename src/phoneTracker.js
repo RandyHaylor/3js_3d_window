@@ -1,10 +1,12 @@
 // Experimental: track the phone's own motion through the room with AlvaAR (visual SLAM,
 // GPLv3, https://github.com/alanross/AlvaAR), run on the FRONT camera frames we already
-// have.
+// have. By default the viewer is blanked out so only the room behind them is tracked.
 // AlvaAR's translation has an arbitrary scale (a single camera can't measure distance).
 
 const ALVA_URL =
   'https://cdn.jsdelivr.net/gh/alanross/AlvaAR@7796af500ee92001ac2a9888363ff64d7a3bee75/dist/alva_ar.js';
+const FACE_PAD = 0.25; // grow the face box by this fraction on each side before masking
+const TORSO_PAD = 1.1; // shoulders: extend the mask this many face-widths to each side
 
 export class PhoneTracker {
   // frames: the FrameSource shared with face tracking. AlvaAR runs on that same downscaled
@@ -37,9 +39,10 @@ export class PhoneTracker {
     this.status = 'initializing';
   }
 
-  // Process the frame just grabbed. The viewer stays in the frame: AlvaAR's pose solver
-  // rejects points that move with them rather than with the room.
-  update() {
+  // Process the frame just grabbed (face tracking must already have run on it, since the
+  // viewer is masked out in place). faceBox: normalized {x0, y0, x1, y1} to blank the
+  // viewer (setting "Mask the viewer"), or null to give AlvaAR the whole frame.
+  update(faceBox) {
     if (!this.alva) return;
     const t0 = performance.now();
     const { canvas, alva } = this;
@@ -48,6 +51,18 @@ export class PhoneTracker {
     const h = canvas.height;
     if (w !== this.alvaW || h !== this.alvaH) return; // frame size changed since AlvaAR started
 
+    if (faceBox) {
+      // Blank the viewer: head plus shoulders/torso down to the bottom of the frame, so
+      // only the room is tracked (points on the viewer move with them, not the room).
+      const bw = faceBox.x1 - faceBox.x0;
+      const bh = faceBox.y1 - faceBox.y0;
+      ctx.fillStyle = '#808080';
+      const headX0 = faceBox.x0 - bw * FACE_PAD;
+      const headY0 = faceBox.y0 - bh * FACE_PAD;
+      ctx.fillRect(headX0 * w, headY0 * h, bw * (1 + 2 * FACE_PAD) * w, h);
+      const torsoY0 = faceBox.y1;
+      ctx.fillRect((faceBox.x0 - bw * TORSO_PAD) * w, torsoY0 * h, bw * (1 + 2 * TORSO_PAD) * w, h);
+    }
     const frame = ctx.getImageData(0, 0, w, h);
 
     // Same calls as AlvaAR.findCameraPose, keeping the status code it discards.
