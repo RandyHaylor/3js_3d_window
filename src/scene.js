@@ -1,19 +1,13 @@
 import * as THREE from 'three';
 
-// A fixed diorama-scale room (meters). The phone screen sits at the origin in the
-// z=0 plane; most of the room lies behind it (-z) but it also wraps around the
-// viewer so rotating the phone reveals the side walls.
-const ROOM = { x0: -0.4, x1: 0.4, y0: -0.4, y1: 0.28, z0: -1.0, z1: 0.6 };
-// The room and everything in it is built at the sizes below and then scaled so the back
-// wall sits 48 in (1.219 m) behind the screen. 1 virtual meter = 1 real meter after this.
-const INCH = 0.0254;
-const SCENE_SCALE = (48 * INCH) / -ROOM.z0;
-// Foreground object: 6 in behind the window (in the unscaled build units below).
-const FOREGROUND_Z = -(6 * INCH) / SCENE_SCALE;
-// Height the objects are arranged on. Kept above the floor so the floor sits well
-// below the screen's lower edge while the objects stay in view.
-const BASE_Y = -0.16;
-const GRID_STEP = 0.05;
+// A real-size room (meters, 1 virtual meter = 1 real meter): 15 × 15 ft, 8 ft high, centered
+// on the viewer's starting position. The phone screen starts at the origin, facing the
+// viewer (+z); "in front" is −z. The phone is held 4 ft above the floor.
+// Objects are 2–5 ft high, stand on the floor all around the viewer (more of them in
+// front), and the closest is 3 ft away.
+const FT = 0.3048;
+const ROOM = { x0: -7.5 * FT, x1: 7.5 * FT, y0: -4 * FT, y1: 4 * FT, z0: -7.5 * FT, z1: 7.5 * FT };
+const GRID_STEP = 1 * FT;
 
 function gridPlane(width, height, step, color, opacity) {
   const pts = [];
@@ -34,12 +28,12 @@ function surface(width, height, color) {
   return mesh;
 }
 
-// One inward-facing wall: a solid plane plus grid lines just in front of it.
+// One inward-facing wall: a solid plane plus a 1 ft grid just in front of it.
 function wall(width, height, color, gridColor, gridOpacity) {
   const g = new THREE.Group();
   g.add(surface(width, height, color));
   const grid = gridPlane(width, height, GRID_STEP, gridColor, gridOpacity);
-  grid.position.z = 0.0008;
+  grid.position.z = 0.002;
   g.add(grid);
   return g;
 }
@@ -64,7 +58,7 @@ function buildRoom() {
   back.position.set(cx, cy, z0);
   room.add(back);
 
-  const front = wall(w, h, 0x1a1d33, 0x7a6cff, 0.3);
+  const front = wall(w, h, 0x1a1d33, 0x7a6cff, 0.35);
   front.rotation.y = Math.PI;
   front.position.set(cx, cy, z1);
   room.add(front);
@@ -92,75 +86,88 @@ function shadowed(mesh) {
   return mesh;
 }
 
-// A stand rising from the floor to `height` above BASE_Y.
-function pedestal(x, z, height, radius, color) {
-  const top = BASE_Y + height;
-  const len = top - ROOM.y0;
-  const m = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 1.1, len, 32), std(color)));
-  m.position.set(x, ROOM.y0 + len / 2, z);
-  return m;
+// Floor position at `azDeg` degrees from straight ahead (−z; positive = to the right) and
+// `distFt` feet from the viewer's starting position.
+function spot(azDeg, distFt) {
+  const a = (azDeg * Math.PI) / 180;
+  return { x: Math.sin(a) * distFt * FT, z: -Math.cos(a) * distFt * FT };
+}
+
+// A stand from the floor up to `heightFt`, with `top` (a mesh centered on its own origin,
+// `topFt` tall) resting on it. Total height = heightFt + topFt.
+function onStand(azDeg, distFt, heightFt, standColor, top, topFt) {
+  const g = new THREE.Group();
+  const { x, z } = spot(azDeg, distFt);
+  const len = heightFt * FT;
+  const stand = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.05, len, 24), std(standColor)));
+  stand.position.set(x, ROOM.y0 + len / 2, z);
+  g.add(stand);
+  top.position.set(x, ROOM.y0 + len + (topFt * FT) / 2, z);
+  g.add(shadowed(top));
+  return g;
+}
+
+// A shape standing directly on the floor; `mesh` is centered on its own origin, `heightFt` tall.
+function onFloor(azDeg, distFt, heightFt, mesh) {
+  const { x, z } = spot(azDeg, distFt);
+  mesh.position.set(x, ROOM.y0 + (heightFt * FT) / 2, z);
+  return shadowed(mesh);
 }
 
 function buildObjects() {
   const g = new THREE.Group();
-  const floorY = BASE_Y;
 
-  // Foreground: a small torus knot (about 1 cm across) 6 in behind the glass, at eye-line
-  // height on a thin stand. Through a phone-sized window only ~2.7 cm is visible at 6 in.
-  const fgStandH = 0.156;
-  g.add(pedestal(0, FOREGROUND_Z, fgStandH, 0.0015, 0x8890b0));
-  const knot = shadowed(new THREE.Mesh(new THREE.TorusKnotGeometry(0.003, 0.0009, 160, 24), std(0xffc94a, { metalness: 0.4 })));
-  knot.position.set(0, floorY + fgStandH + 0.004, FOREGROUND_Z);
+  // In front (most of the objects). Closest: 3 ft straight ahead, 3.5 ft tall.
+  const knot = new THREE.Mesh(new THREE.TorusKnotGeometry(0.09, 0.028, 160, 24), std(0xffc94a, { metalness: 0.4 }));
   knot.rotation.set(0.4, 0.6, 0);
-  g.add(knot);
+  g.add(onStand(0, 3, 2.75, 0x8890b0, knot, 0.75));
 
-  // Mid-ground: columns of varying height and a sphere, staggered for occlusion.
-  const mids = [
-    [-0.09, -0.24, 0.16, 0xff5d8f],
-    [0.07, -0.32, 0.22, 0x5ec8ff],
-    [-0.02, -0.42, 0.11, 0x3fd6a0],
-  ];
-  for (const [x, z, hgt, c] of mids) {
-    g.add(pedestal(x, z, hgt, 0.022, c));
-    const cap = shadowed(new THREE.Mesh(new THREE.IcosahedronGeometry(0.02, 0), std(0xffffff, { flatShading: true })));
-    cap.position.set(x, floorY + hgt + 0.03, z);
-    g.add(cap);
-  }
-  const ball = shadowed(new THREE.Mesh(new THREE.SphereGeometry(0.035, 48, 32), std(0xa98bff, { metalness: 0.6, roughness: 0.2 })));
-  ball.position.set(0.13, floorY + 0.035, -0.18);
-  g.add(ball);
+  g.add(onFloor(-28, 4.5, 5, new THREE.Mesh(new THREE.BoxGeometry(0.3, 5 * FT, 0.3), std(0xff5d8f))));
+  g.add(onFloor(26, 4, 2.5, new THREE.Mesh(new THREE.ConeGeometry(0.18, 2.5 * FT, 32), std(0x3fd6a0))));
 
-  // Far: a ring (about 12 cm across) on the back wall at eye-line height, plus a row of cubes.
-  const ring = shadowed(new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.006, 24, 96), std(0xff8a5c, { emissive: 0x401808 })));
-  ring.position.set(0, floorY + 0.16, ROOM.z0 + 0.06);
-  g.add(ring);
-  for (let i = 0; i < 7; i++) {
-    const s = 0.04;
-    const cube = shadowed(new THREE.Mesh(new THREE.BoxGeometry(s, s, s), std(new THREE.Color().setHSL(i / 7, 0.7, 0.55))));
-    cube.position.set(-0.27 + i * 0.09, floorY + s / 2, -0.78);
-    cube.rotation.y = i * 0.3;
-    g.add(cube);
+  const ball = new THREE.Mesh(new THREE.SphereGeometry(0.15, 48, 32), std(0xa98bff, { metalness: 0.6, roughness: 0.2 }));
+  g.add(onStand(-10, 6.2, 3, 0x5ec8ff, ball, 1));
+
+  // A stack of three cubes, 3 ft total.
+  for (let i = 0; i < 3; i++) {
+    const s = FT * (1.15 - i * 0.15);
+    const cube = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), std(new THREE.Color().setHSL(0.08 + i * 0.12, 0.7, 0.55)));
+    const { x, z } = spot(14, 5.8);
+    let y = ROOM.y0;
+    for (let j = 0; j < i; j++) y += FT * (1.15 - j * 0.15);
+    cube.position.set(x, y + s / 2, z);
+    cube.rotation.y = i * 0.4;
+    g.add(shadowed(cube));
   }
 
-  // Off to the sides, found by turning the phone.
-  const leftCone = shadowed(new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 32), std(0x3fd6a0)));
-  leftCone.position.set(-0.3, floorY + 0.08, -0.05);
-  g.add(leftCone);
-  const rightBox = shadowed(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.2, 0.08), std(0xff5d8f)));
-  rightBox.position.set(0.3, floorY + 0.1, 0.0);
-  rightBox.rotation.y = 0.5;
-  g.add(rightBox);
-  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.025, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff2c4 }));
-  lamp.position.set(0, ROOM.y1 - 0.04, -0.35);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.03, 24, 96), std(0xff8a5c, { emissive: 0x401808 }));
+  g.add(onStand(3, 7, 3.6, 0x8890b0, ring, 1.4));
+
+  // To the sides.
+  g.add(onFloor(-80, 4, 3, new THREE.Mesh(new THREE.ConeGeometry(0.2, 3 * FT, 32), std(0x3fd6a0))));
+  const side = new THREE.Mesh(new THREE.BoxGeometry(0.35, 4 * FT, 0.25), std(0xff8a5c));
+  side.rotation.y = 0.5;
+  g.add(onFloor(85, 4.5, 4, side));
+
+  // Behind.
+  const behindBall = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), std(0xffffff, { flatShading: true }));
+  g.add(onStand(160, 4, 1.5, 0xff5d8f, behindBall, 1));
+  g.add(onFloor(-150, 5, 5, new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 5 * FT, 32), std(0x5ec8ff))));
+
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.08, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff2c4 }));
+  lamp.position.set(0, ROOM.y1 - 0.15, 0);
   g.add(lamp);
 
   return g;
 }
 
+const KEY_INTENSITY = 6;
+const KEY_DECAY = 1.2;
+
 export function createScene() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x07080f);
-  scene.fog = new THREE.Fog(0x07080f, 2.5, 6); // distances from the eye; back wall ≈ 2.2 m
+  scene.fog = new THREE.Fog(0x07080f, 6, 14); // distances from the camera; far corner ≈ 3.5 m
 
   const world = new THREE.Group(); // scaled by the "world scale" setting
   scene.add(world);
@@ -168,24 +175,23 @@ export function createScene() {
   world.add(buildObjects());
 
   world.add(new THREE.HemisphereLight(0xb8c4ff, 0x1a1420, 0.9));
-  const key = new THREE.PointLight(0xfff2c4, 1.6, 0, 1.2);
-  key.position.set(0, ROOM.y1 - 0.08, -0.35);
+  const key = new THREE.PointLight(0xfff2c4, KEY_INTENSITY, 0, KEY_DECAY);
+  key.position.set(0, ROOM.y1 - 0.3, 0);
   key.castShadow = true;
   key.shadow.mapSize.set(1024, 1024);
-  key.shadow.camera.near = 0.01;
-  key.shadow.camera.far = 8;
+  key.shadow.camera.near = 0.05;
+  key.shadow.camera.far = 20;
   key.shadow.bias = -0.002;
   world.add(key);
   const fill = new THREE.DirectionalLight(0x8fb8ff, 0.6);
-  fill.position.set(0.3, 0.5, 0.5);
+  fill.position.set(1, 2, 2);
   world.add(fill);
 
-  // Uniformly resize the world (the user's World scale on top of SCENE_SCALE). The point
-  // light falls off with distance, so its intensity is compensated to keep brightness.
+  // Uniformly resize the world (the user's World scale; 1 = real size). The point light
+  // falls off with distance, so its intensity is compensated to keep brightness.
   function setWorldScale(userScale) {
-    const s = userScale * SCENE_SCALE;
-    world.scale.setScalar(s);
-    key.intensity = 1.6 * Math.pow(s, 1.2);
+    world.scale.setScalar(userScale);
+    key.intensity = KEY_INTENSITY * Math.pow(userScale, KEY_DECAY);
   }
 
   return { scene, setWorldScale };

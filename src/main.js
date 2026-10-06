@@ -36,7 +36,7 @@ import { FrameSource } from './frameSource.js';
 import { OrientationTracker, requestOrientationPermission, eventTime } from './orientation.js';
 import { DelayEstimator } from './timeline.js';
 
-const FAR = 6;
+const FAR = 20;
 const LOST_AFTER = 0.25; // s without a face before the view is blanked
 
 const IS_PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
@@ -51,6 +51,7 @@ const DEFAULTS = {
   smoothing: 4,
   rotationSmoothing: 4, // Hz, camera rotation (eye → phone direction)
   eyeWorldSmoothing: 1, // Hz, the eye's position in 3D space (plain low-pass)
+  alvaScale: null, // meters per AlvaAR unit, last measured (kept across map resets and visits)
   flipX: false,
   useIris: true, // iris diameter (11.7 mm) is the physical reference for eye scale
   autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
@@ -381,9 +382,22 @@ function updateEyeCorrection(measured, t) {
   saveSettings();
 }
 
+// A new AlvaAR map restarts the scale measurement, but the last scale found stays in use
+// (knownScale) until the new measurement completes.
 function resetCalibration() {
   motionScale.reset();
   eyeFit.samples.length = 0;
+}
+
+// Meters per AlvaAR unit: the current map's measurement, else the last one found (kept in
+// settings, so also across visits), else null (never measured).
+function knownScale() {
+  const k = motionScale.scale;
+  if (k !== null && (settings.alvaScale === null || Math.abs(k / settings.alvaScale - 1) > 0.01)) {
+    settings.alvaScale = k;
+    saveSettings();
+  }
+  return k ?? settings.alvaScale;
 }
 
 const calibration = () => ({
@@ -514,8 +528,10 @@ function updateTracking(t, nowMs) {
       ? ''
       : motionScale.scale !== null
         ? ' · Scale ✓'
-        : ` · Scale ${Math.min(motionScale.pairs, MIN_SCALE_PAIRS)}/${MIN_SCALE_PAIRS}`;
-    const ready = !track.lost && (!pt || (pt.status === 'tracking' && motionScale.scale !== null));
+        : knownScale() !== null
+          ? ' · Scale (last)'
+          : ` · Scale ${Math.min(motionScale.pairs, MIN_SCALE_PAIRS)}/${MIN_SCALE_PAIRS}`;
+    const ready = !track.lost && (!pt || (pt.status === 'tracking' && knownScale() !== null));
     setStatus(eyes + room + scale, ready ? 'ok' : track.lost ? 'warn' : '');
   }
 }
@@ -539,7 +555,7 @@ function alvaCameraPose(pose) {
 // reference moment, so a new AlvaAR map doesn't change the world's axes.
 function measuredPhonePose(tc) {
   const pt = phoneTracker;
-  const k = motionScale.scale; // meters per AlvaAR unit; null until calibrated
+  const k = knownScale(); // meters per AlvaAR unit; null if never measured
   if (!pt || pt.status !== 'tracking' || !pt.pose || k === null) return null;
   if (pt.resets !== alvaResets) {
     alvaResets = pt.resets; // new map: new origin and scale
@@ -602,12 +618,11 @@ function syncedUpdate(tc, e) {
   if (!e) return hold('noFace', 'no face');
   const sensors = settings.useOrientation && orient.hasData;
   let measured = null;
-  if (sensors && phoneTracker) {
+  // No scale ever found: the camera still follows the eye; the phone position stays put.
+  const noScale = knownScale() === null;
+  if (sensors && phoneTracker && !noScale) {
     measured = phoneMotion.hasData ? measuredPhonePose(tc) : null;
-    if (!measured) {
-      const scaleMissing = phoneTracker.status === 'tracking' && motionScale.scale === null;
-      return hold('noPosition', scaleMissing ? 'scale not calibrated' : 'room not tracked');
-    }
+    if (!measured) return hold('noPosition', 'room not tracked');
   }
 
   // Candidate phone position: AlvaAR's motion since the last complete frame.
@@ -642,7 +657,13 @@ function syncedUpdate(tc, e) {
     anchor: eyeAnchor.map(r4), // smoothed in the room
     pos: phonePos.map(r4),
   });
-  view.source = !sensors ? 'synced (no motion sensors: phone fixed)' : measured ? 'synced' : 'synced (phone tracking off)';
+  view.source = !sensors
+    ? 'synced (no motion sensors: phone fixed)'
+    : measured
+      ? 'synced'
+      : phoneTracker
+        ? 'synced (no scale yet: phone position held)'
+        : 'synced (phone tracking off)';
 }
 
 // The camera:
@@ -850,7 +871,12 @@ function renderDebug() {
       lines.push(`phone track ${pt.status}  pts ${pt.points}  ${pt.ms.toFixed(0)} ms`);
       lines.push(`phone track pos ${pos} (AlvaAR units)`);
       const k = motionScale.scale;
-      lines.push(`motion scale ${k === null ? 'calibrating' : k.toFixed(3) + ' m/unit'}  (${motionScale.pairs} samples)`);
+      const used = knownScale();
+      lines.push(
+        `motion scale ${k === null ? 'calibrating' : k.toFixed(3) + ' m/unit'}  (${motionScale.pairs} samples)  in use: ${
+          used === null ? 'none (phone position held)' : used.toFixed(3) + (k === null ? ' (last found)' : '')
+        }`
+      );
       const f = eyeFit.last;
       const fitText = f
         ? `last fit ${f.lateral.toFixed(2)}/${f.depth.toFixed(2)}/${(f.offset * 100).toFixed(1)}cm rms ${(f.rms * 100).toFixed(1)} cm`
