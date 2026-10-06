@@ -139,7 +139,6 @@ const RING = [
 
 function buildObjects() {
   const g = new THREE.Group();
-  const INCH = FT / 12;
   RING.forEach(([dist, top, rIn], i) => {
     const r = rIn * INCH;
     const shape = SHAPES[i % SHAPES.length](r, COLORS[(i * 5) % COLORS.length]);
@@ -154,8 +153,128 @@ function buildObjects() {
   return g;
 }
 
-const KEY_INTENSITY = 6;
 const KEY_DECAY = 1.2;
+
+// A shadow-casting point light; `base` is its intensity at world scale 1.
+function keyLight(base, x, y, z, far) {
+  const key = new THREE.PointLight(0xfff2c4, base, 0, KEY_DECAY);
+  key.userData.base = base;
+  key.position.set(x, y, z);
+  key.castShadow = true;
+  key.shadow.mapSize.set(1024, 1024);
+  key.shadow.camera.near = 0.02;
+  key.shadow.camera.far = far;
+  key.shadow.bias = -0.002;
+  return key;
+}
+
+// ---------- experience: room ----------
+function buildRoomExperience() {
+  const g = new THREE.Group();
+  g.add(buildRoom());
+  g.add(buildObjects());
+  g.add(keyLight(6, 0, ROOM.y1 - 0.3, 0, 20));
+  return g;
+}
+
+// ---------- experience: box ----------
+// A 2 × 2 × 2 ft box, open toward the viewer, centered on the starting line of sight with
+// its opening 6 in beyond the screen. Small objects (1–2 in) sit inside at different
+// depths and heights, on pegs, on a shelf and hanging, to look at and around.
+const INCH = FT / 12;
+const BOX = { half: 1 * FT, z0: -6 * INCH - 2 * FT, z1: -6 * INCH };
+
+function buildBox() {
+  const { half, z0, z1 } = BOX;
+  const depth = z1 - z0;
+  const cz = (z0 + z1) / 2;
+  const box = new THREE.Group();
+  const step = 2 * INCH;
+  const place = (w, h, color, gridColor, rot, pos) => {
+    const g = new THREE.Group();
+    g.add(surface(w, h, color));
+    const grid = gridPlane(w, h, step, gridColor, 0.5);
+    grid.position.z = 0.001;
+    g.add(grid);
+    g.rotation.set(...rot);
+    g.position.set(...pos);
+    box.add(g);
+  };
+  place(2 * half, depth, 0x15182a, 0x5ec8ff, [-Math.PI / 2, 0, 0], [0, -half, cz]); // floor
+  place(2 * half, depth, 0x101220, 0x3a4470, [Math.PI / 2, 0, 0], [0, half, cz]); // ceiling
+  place(2 * half, 2 * half, 0x1a1d33, 0x7a6cff, [0, 0, 0], [0, 0, z0]); // back
+  place(depth, 2 * half, 0x181b2e, 0x3fd6a0, [0, Math.PI / 2, 0], [-half, 0, cz]); // left
+  place(depth, 2 * half, 0x181b2e, 0xff8a5c, [0, -Math.PI / 2, 0], [half, 0, cz]); // right
+
+  // The open front's frame, so the box's edge reads clearly.
+  const t = 0.5 * INCH;
+  const frameMat = std(0x8890b0);
+  for (const [w, h, x, y] of [
+    [2 * half + 2 * t, t, 0, half + t / 2],
+    [2 * half + 2 * t, t, 0, -half - t / 2],
+    [t, 2 * half, -half - t / 2, 0],
+    [t, 2 * half, half + t / 2, 0],
+  ]) {
+    const bar = shadowed(new THREE.Mesh(new THREE.BoxGeometry(w, h, t), frameMat));
+    bar.position.set(x, y, z1);
+    box.add(bar);
+  }
+  return box;
+}
+
+// [x in, depth in behind the opening, top height in above the box floor, radius in]
+const BOX_ITEMS = [
+  [-6, 4, 7, 1.2],
+  [5, 7, 11, 1],
+  [0, 12, 5, 1.6],
+  [-3, 17, 14, 1],
+  [7, 15, 4, 1.3],
+  [-8, 20, 9, 1.1],
+  [2, 21, 17, 0.9],
+];
+
+function buildBoxExperience() {
+  const g = new THREE.Group();
+  g.add(buildBox());
+  const floorY = -BOX.half;
+  BOX_ITEMS.forEach(([xIn, dIn, topIn, rIn], i) => {
+    const r = rIn * INCH;
+    const shape = shadowed(SHAPES[i % SHAPES.length](r, COLORS[(i * 5 + 1) % COLORS.length]));
+    shape.rotation.set(0.4 * i, 0.7 * i, 0);
+    const x = xIn * INCH;
+    const z = BOX.z1 - dIn * INCH;
+    const top = floorY + topIn * INCH;
+    const peg = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, top - 2 * r - floorY, 12), std(0x8890b0)));
+    peg.position.set(x, floorY + (top - 2 * r - floorY) / 2, z);
+    g.add(peg);
+    shape.position.set(x, top - r, z);
+    g.add(shape);
+  });
+
+  // A shelf on the left wall with a small item, and one item hanging from the ceiling.
+  const shelf = shadowed(new THREE.Mesh(new THREE.BoxGeometry(4 * INCH, 0.3 * INCH, 3 * INCH), std(0x8890b0)));
+  shelf.position.set(-BOX.half + 2 * INCH, 4 * INCH, BOX.z1 - 9 * INCH);
+  g.add(shelf);
+  const onShelf = shadowed(SHAPES[3](0.9 * INCH, 0xffc94a));
+  onShelf.position.set(-BOX.half + 2 * INCH, 4 * INCH + 0.15 * INCH + 0.9 * INCH, BOX.z1 - 9 * INCH);
+  g.add(onShelf);
+  const hangLen = 6 * INCH;
+  const thread = new THREE.Mesh(new THREE.CylinderGeometry(0.001, 0.001, hangLen, 6), std(0xcccccc));
+  thread.position.set(4 * INCH, BOX.half - hangLen / 2, BOX.z1 - 10 * INCH);
+  g.add(thread);
+  const hanging = shadowed(SHAPES[0](1.1 * INCH, 0xa98bff));
+  hanging.position.set(4 * INCH, BOX.half - hangLen - 1.1 * INCH, BOX.z1 - 10 * INCH);
+  g.add(hanging);
+
+  g.add(keyLight(1.5, 0, BOX.half - 2 * INCH, BOX.z1 - 4 * INCH, 3));
+  return g;
+}
+
+// Experience names → builders, in the order the settings list shows them.
+export const EXPERIENCES = [
+  { key: 'room', label: 'Room (15 × 15 ft, objects all around)', build: buildRoomExperience },
+  { key: 'box', label: 'Box (2 × 2 ft, small objects inside)', build: buildBoxExperience },
+];
 
 export function createScene() {
   const scene = new THREE.Scene();
@@ -164,28 +283,34 @@ export function createScene() {
 
   const world = new THREE.Group(); // scaled by the "world scale" setting
   scene.add(world);
-  world.add(buildRoom());
-  world.add(buildObjects());
+  const experiences = {};
+  for (const ex of EXPERIENCES) {
+    experiences[ex.key] = ex.build();
+    world.add(experiences[ex.key]);
+  }
 
   world.add(new THREE.HemisphereLight(0xb8c4ff, 0x1a1420, 0.9));
-  const key = new THREE.PointLight(0xfff2c4, KEY_INTENSITY, 0, KEY_DECAY);
-  key.position.set(0, ROOM.y1 - 0.3, 0);
-  key.castShadow = true;
-  key.shadow.mapSize.set(1024, 1024);
-  key.shadow.camera.near = 0.05;
-  key.shadow.camera.far = 20;
-  key.shadow.bias = -0.002;
-  world.add(key);
   const fill = new THREE.DirectionalLight(0x8fb8ff, 0.6);
   fill.position.set(1, 2, 2);
   world.add(fill);
 
-  // Uniformly resize the world (the user's World scale; 1 = real size). The point light
-  // falls off with distance, so its intensity is compensated to keep brightness.
-  function setWorldScale(userScale) {
-    world.scale.setScalar(userScale);
-    key.intensity = KEY_INTENSITY * Math.pow(userScale, KEY_DECAY);
+  // Show one experience (unknown names fall back to the first).
+  function setExperience(key) {
+    const show = experiences[key] ? key : EXPERIENCES[0].key;
+    for (const [k, g] of Object.entries(experiences)) g.visible = k === show;
   }
 
-  return { scene, setWorldScale };
+  // Uniformly resize the world (the user's World scale; 1 = real size). Point lights fall
+  // off with distance, so their intensity is compensated to keep brightness.
+  let scale = 1;
+  function setWorldScale(userScale) {
+    if (userScale === scale) return;
+    scale = userScale;
+    world.scale.setScalar(userScale);
+    world.traverse((o) => {
+      if (o.isPointLight) o.intensity = o.userData.base * Math.pow(userScale, KEY_DECAY);
+    });
+  }
+
+  return { scene, setWorldScale, setExperience };
 }

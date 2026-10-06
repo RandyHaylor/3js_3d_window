@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createScene } from './scene.js';
+import { createScene, EXPERIENCES } from './scene.js';
 import {
   displaySizeM,
   pageSizeM,
@@ -60,6 +60,7 @@ const DEFAULTS = {
   phoneTracking: true,
   showStats: false, // stats drawer (top-left ▾)
   cameraSize: '640x480', // requested front-camera size; larger only if a camera crops at small sizes
+  experience: 'room', // which scene is shown (scene.js EXPERIENCES)
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
@@ -156,7 +157,8 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-const { scene, setWorldScale } = createScene();
+const { scene, setWorldScale, setExperience } = createScene();
+setExperience(settings.experience);
 const camera = new THREE.PerspectiveCamera();
 camera.matrixAutoUpdate = true;
 
@@ -1000,6 +1002,22 @@ function buildSliders(body, list) {
 function buildSettings() {
   const body = $('settingsBody');
   body.textContent = '';
+
+  // Experience: which scene is shown.
+  const exRow = document.createElement('div');
+  exRow.className = 'setting';
+  exRow.innerHTML =
+    `<label for="set-experience">Experience</label><output></output>` +
+    `<select id="set-experience">${EXPERIENCES.map(
+      (ex) => `<option value="${ex.key}"${ex.key === settings.experience ? ' selected' : ''}>${ex.label}</option>`
+    ).join('')}</select>`;
+  exRow.querySelector('select').addEventListener('change', (e) => {
+    settings.experience = e.target.value;
+    setExperience(settings.experience);
+    saveSettings();
+  });
+  body.appendChild(exRow);
+
   buildSliders(body, SLIDERS);
 
   // Front-camera resolution: from the largest the camera reports down to 640×480 (0.3 MP).
