@@ -228,7 +228,31 @@ addEventListener('devicemotion', (e) => {
   logImu(t, [a.x, a.y, a.z]);
   phoneMotion.acc += (Math.hypot(a.x, a.y, a.z) - phoneMotion.acc) * 0.3;
   if (phoneMotion.acc > MOVING_ACCEL) phoneMotion.lastMovingT = t;
+  integrateImu([a.x, a.y, a.z], t);
 });
+
+// Accelerometer position deltas, used only while AlvaAR isn't sending. Each reading is in
+// the phone's own axes; the phone's rotation gives its direction (rotate(phoneRotation,
+// reading)). It is integrated into a velocity and a pending position delta, applied on the
+// next frame. At rest the velocity is zeroed so drift can't build up.
+const imuNav = { v: [0, 0, 0], pending: [0, 0, 0], lastT: null };
+const imuQ = new THREE.Quaternion();
+function integrateImu(acc, t) {
+  const dt = imuNav.lastT === null ? 0 : Math.min(0.1, t - imuNav.lastT);
+  imuNav.lastT = t;
+  if (!dt) return;
+  if (!phoneIsMoving()) {
+    imuNav.v = [0, 0, 0];
+    return;
+  }
+  if (settings.useOrientation && orient.hasData) orient.relative(imuQ);
+  else imuQ.identity();
+  const a = rotate({ x: imuQ.x, y: imuQ.y, z: imuQ.z, w: imuQ.w }, acc);
+  for (let i = 0; i < 3; i++) {
+    imuNav.v[i] += a[i] * dt;
+    imuNav.pending[i] += imuNav.v[i] * dt;
+  }
+}
 
 // Face-tracked eye before the automatic correction (screen frame, meters).
 const eyeRaw = neutralEye();
@@ -455,6 +479,7 @@ function measuredPhonePose() {
 // (on Start/Recenter) and changes ONLY while the phone itself is physically moving.
 let phonePos = [0, 0, 0];
 let lastTrackedP = null; // AlvaAR's previous phone position, to take frame-to-frame deltas
+let lastTrackedT = 0; // when that position arrived (for the velocity handed to the accelerometer)
 
 // The camera:
 //   position = phone position in space
@@ -467,19 +492,33 @@ function updateCamera(t) {
   else phoneQ.identity(); // no motion sensors (e.g. a computer screen): the screen is fixed
   const q = { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w };
 
-  // Phone position: AlvaAR's motion is applied only while the accelerometer shows the
-  // phone itself moving. Without motion sensors the position never changes.
+  // Phone position changes by deltas, only while the accelerometer shows the phone itself
+  // moving. While AlvaAR is sending, its deltas are used (and set the velocity the
+  // accelerometer continues from); while it isn't, the accelerometer's deltas are used.
+  // Without motion sensors the position never changes.
   const measured = sensors && phoneMotion.hasData ? measuredPhonePose() : null;
+  const moving = phoneIsMoving();
   if (measured) {
-    if (lastTrackedP && phoneIsMoving()) {
-      for (let i = 0; i < 3; i++) phonePos[i] += measured.p[i] - lastTrackedP[i];
+    if (lastTrackedP) {
+      const d = [0, 1, 2].map((i) => measured.p[i] - lastTrackedP[i]);
+      if (d.some((v) => v !== 0)) {
+        // A new AlvaAR position: apply it, and keep its velocity for handing over.
+        const dtA = Math.max(1e-3, t - lastTrackedT);
+        if (moving) for (let i = 0; i < 3; i++) phonePos[i] += d[i];
+        imuNav.v = moving ? d.map((v) => v / dtA) : [0, 0, 0];
+        lastTrackedT = t;
+      }
+    } else {
+      lastTrackedT = t;
     }
     lastTrackedP = measured.p;
     view.measuredQ = measured.q;
     if (!track.lost && settings.autoEyeCal) updateEyeCorrection(measured, t);
   } else {
     lastTrackedP = null;
+    if (sensors && moving) for (let i = 0; i < 3; i++) phonePos[i] += imuNav.pending[i];
   }
+  imuNav.pending = [0, 0, 0]; // AlvaAR's deltas replace the accelerometer's while it sends
 
   const s = screenFromPose(phonePos, q, screenM.w, screenM.h);
   // Where the eye is, relative to the phone: used only for the camera's rotation and FOV.
@@ -499,7 +538,13 @@ function updateCamera(t) {
 
   view.phoneW = phonePos;
   view.d = wc.dist;
-  view.source = measured ? (phoneIsMoving() ? 'phone moving' : 'phone still') : 'phone fixed';
+  view.source = !sensors
+    ? 'no motion sensors: phone fixed'
+    : !moving
+      ? 'phone at rest'
+      : measured
+        ? 'moving: AlvaAR'
+        : 'moving: accelerometer';
   return true;
 }
 
@@ -509,6 +554,8 @@ function recenter() {
   else phoneQ.identity();
   phonePos = [0, 0, 0]; // phone (camera) back at the world origin
   lastTrackedP = null;
+  imuNav.v = [0, 0, 0];
+  imuNav.pending = [0, 0, 0];
   alvaRef = null; // AlvaAR: the current pose becomes the reference
 }
 
@@ -634,7 +681,7 @@ function renderDebug() {
     lines.push(
       `camera: ${video.videoWidth}×${video.videoHeight} → processed ${frames.width}×${frames.height} at ${camRate.fps.toFixed(1)} fps  FOV setting ${settings.fovDeg}°`
     );
-    if (phoneTracker && view.source === 'AlvaAR') {
+    if (phoneTracker && view.measuredQ) {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
       const mq = view.measuredQ;
       euler.setFromQuaternion(new THREE.Quaternion(mq.x, mq.y, mq.z, mq.w), 'YXZ');
