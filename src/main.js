@@ -60,6 +60,8 @@ const DEFAULTS = {
   showStats: false, // stats drawer (top-left ▾)
   cameraSize: '640x480', // requested front-camera size; larger only if a camera crops at small sizes
   experience: 'room', // which scene is shown (scene.js EXPERIENCES)
+  // glTF model for the "Model from URL" experience (direct .glb/.gltf link)
+  modelUrl: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Fox/glTF-Binary/Fox.glb',
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
@@ -156,8 +158,36 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-const { scene, setWorldScale, setExperience } = createScene();
-setExperience(settings.experience);
+const { scene, setWorldScale, setExperience, loadModel, update: updateScene } = createScene();
+
+// The model experience loads settings.modelUrl the first time it is shown (or on Load).
+const model = { url: null, status: 'not loaded' };
+function showModel(url) {
+  model.url = url;
+  model.status = 'loading…';
+  refreshModelStatus();
+  loadModel(url)
+    .then(({ animations }) => {
+      if (model.url !== url) return; // a newer load replaced this one
+      model.status = `loaded${animations ? ` (playing 1 of ${animations} animations)` : ''}`;
+      refreshModelStatus();
+    })
+    .catch((err) => {
+      if (model.url !== url) return;
+      console.error(err);
+      model.status = `failed: ${err.message || err}. Needs a direct .glb/.gltf link that allows cross-origin loading.`;
+      refreshModelStatus();
+    });
+}
+function refreshModelStatus() {
+  const el = document.getElementById('modelStatus');
+  if (el) el.textContent = model.status;
+}
+function applyExperience() {
+  setExperience(settings.experience);
+  if (settings.experience === 'model' && model.url !== settings.modelUrl) showModel(settings.modelUrl);
+}
+applyExperience();
 const camera = new THREE.PerspectiveCamera();
 camera.matrixAutoUpdate = true;
 
@@ -756,6 +786,7 @@ renderer.setAnimationLoop((nowMs) => {
   // lost eye stays where it was last seen.
   const hasEye = mode !== 'camera' || (tracker && eyeAnchor !== null);
   setWorldScale(settings.worldScale);
+  updateScene(dt); // model animation
   if (hasEye && updateCamera(t)) {
     renderer.setRenderTarget(renderTarget);
     renderer.render(scene, camera);
@@ -1034,12 +1065,39 @@ function buildSettings() {
     `<select id="set-experience">${EXPERIENCES.map(
       (ex) => `<option value="${ex.key}"${ex.key === settings.experience ? ' selected' : ''}>${ex.label}</option>`
     ).join('')}</select>`;
-  exRow.querySelector('select').addEventListener('change', (e) => {
+  const exSelect = exRow.querySelector('select');
+  exSelect.addEventListener('change', (e) => {
     settings.experience = e.target.value;
-    setExperience(settings.experience);
+    applyExperience();
     saveSettings();
   });
   body.appendChild(exRow);
+
+  // Model URL: a direct .glb/.gltf link, loaded into the "Model from URL" experience.
+  const modelRow = document.createElement('div');
+  modelRow.className = 'setting';
+  modelRow.innerHTML =
+    `<label for="set-modelUrl">Model URL (.glb / .gltf)</label><output></output>` +
+    `<div class="url-row"><input id="set-modelUrl" type="url" spellcheck="false" autocomplete="off"><button type="button">Load</button></div>` +
+    `<span class="hint" id="modelStatus"></span>`;
+  const urlInput = modelRow.querySelector('input');
+  urlInput.value = settings.modelUrl;
+  const load = () => {
+    const url = urlInput.value.trim();
+    if (!url) return;
+    settings.modelUrl = url;
+    settings.experience = 'model';
+    exSelect.value = 'model';
+    saveSettings();
+    setExperience('model');
+    showModel(url);
+  };
+  modelRow.querySelector('button').addEventListener('click', load);
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') load();
+  });
+  body.appendChild(modelRow);
+  refreshModelStatus();
 
   buildSliders(body, SLIDERS);
 

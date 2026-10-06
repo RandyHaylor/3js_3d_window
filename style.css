@@ -205,6 +205,22 @@ button:active { transform: scale(0.97); }
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
   padding: 6px 8px;
-}.setting .hint { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+}
+.setting .url-row { grid-column: 1 / -1; display: flex; gap: 6px; min-width: 0; }
+.setting input[type="url"] {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  padding: 6px 8px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.setting .url-row button { padding: 6px 12px; }
+.setting .hint { grid-column: 1 / -1; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .setting.toggle { grid-template-columns: auto 1fr; align-items: center; }
 .setting.toggle input { width: 20px; height: 20px; accent-color: var(--accent); }

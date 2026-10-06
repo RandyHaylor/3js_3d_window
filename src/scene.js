@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 // A real-size room (meters, 1 virtual meter = 1 real meter): 15 × 15 ft, 8 ft high, centered
 // on the viewer's starting position. The phone screen starts at the origin, facing the
@@ -270,10 +271,29 @@ function buildBoxExperience() {
   return g;
 }
 
+// ---------- experience: model ----------
+// The same box, holding a glTF model loaded from a URL (loadModel), scaled so its largest
+// dimension is MODEL_SIZE and centered in the box (at the phone's starting height, in the
+// line of sight), standing on a thin pedestal from the box floor.
+const MODEL_SIZE = 14 * INCH;
+const modelHolder = new THREE.Group();
+const modelPedestal = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 1, 16), std(0x8890b0)));
+
+function buildModelExperience() {
+  const g = new THREE.Group();
+  g.add(buildBox());
+  g.add(modelHolder);
+  modelPedestal.visible = false;
+  g.add(modelPedestal);
+  g.add(keyLight(1.5, 0, BOX.half - 2 * INCH, BOX.z1 - 4 * INCH, 3));
+  return g;
+}
+
 // Experience names → builders, in the order the settings list shows them.
 export const EXPERIENCES = [
   { key: 'room', label: 'Room (15 × 15 ft, objects all around)', build: buildRoomExperience },
   { key: 'box', label: 'Box (2 × 2 ft, small objects inside)', build: buildBoxExperience },
+  { key: 'model', label: 'Model from URL (in the 2 × 2 ft box)', build: buildModelExperience },
 ];
 
 export function createScene() {
@@ -312,5 +332,48 @@ export function createScene() {
     });
   }
 
-  return { scene, setWorldScale, setExperience };
+  // Load a .glb/.gltf from `url` into the model experience, replacing any previous model.
+  // Resolves with { size: [x, y, z] meters as loaded, animations: n }; rejects on failure
+  // (bad URL, not glTF, or the host doesn't allow cross-origin loading).
+  const loader = new GLTFLoader();
+  let mixer = null;
+  function loadModel(url) {
+    return loader.loadAsync(url).then((gltf) => {
+      const model = gltf.scene;
+      model.traverse((o) => {
+        if (o.isMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+        }
+      });
+      // Fit: largest dimension MODEL_SIZE, centered in the box, on a pedestal from the floor.
+      const bounds = new THREE.Box3().setFromObject(model);
+      const size = bounds.getSize(new THREE.Vector3());
+      const k = MODEL_SIZE / Math.max(size.x, size.y, size.z, 1e-6);
+      model.scale.setScalar(k);
+      const center = bounds.getCenter(new THREE.Vector3());
+      const cz = (BOX.z0 + BOX.z1) / 2;
+      model.position.set(-center.x * k, -center.y * k, cz - center.z * k);
+      const bottom = (bounds.min.y - center.y) * k; // model's lowest point (box center at 0)
+      const len = bottom + BOX.half;
+      modelPedestal.scale.y = len;
+      modelPedestal.position.set(0, -BOX.half + len / 2, cz);
+      modelPedestal.visible = true;
+      modelHolder.clear();
+      modelHolder.add(model);
+      mixer = null;
+      if (gltf.animations.length) {
+        mixer = new THREE.AnimationMixer(model);
+        mixer.clipAction(gltf.animations[0]).play();
+      }
+      return { size: size.toArray(), animations: gltf.animations.length };
+    });
+  }
+
+  // Per-frame update (model animation), dt in seconds.
+  function update(dt) {
+    if (mixer && experiences.model.visible) mixer.update(dt);
+  }
+
+  return { scene, setWorldScale, setExperience, loadModel, update };
 }
