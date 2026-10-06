@@ -28,7 +28,7 @@ import {
   windowCamera,
 } from './viewModel.js';
 import { Vec3Filter } from './filters.js';
-import { FaceTracker, openFrontCamera } from './faceTracker.js';
+import { FaceTracker, openFrontCamera, CAMERA_FORMATS } from './faceTracker.js';
 import { PhoneTracker } from './phoneTracker.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
 
@@ -55,6 +55,7 @@ const DEFAULTS = {
   phoneTracking: true,
   showStats: false, // stats drawer (top-left ▾)
   eyeCamera: false, // false: camera at the window (default); true: camera at the eye, off-axis frustum
+  cameraFormat: '640x480', // front-camera format requested from Safari (see CAMERA_FORMATS)
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
@@ -532,6 +533,7 @@ function renderDebug() {
     const d = distStats;
     lines.push(`dist cm  eyes ${d.eyes.text()}  2D ${d.eyes2d.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
+    lines.push(`camera: asked ${settings.cameraFormat}, got ${video.videoWidth}×${video.videoHeight}  FOV setting ${settings.fovDeg}°`);
     if (phoneTracker && view.source === 'AlvaAR') {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
       const mq = view.measuredQ;
@@ -584,7 +586,7 @@ function startOrientation() {
 $('start').addEventListener('click', () => {
   startOrientation();
   const cam = navigator.mediaDevices?.getUserMedia
-    ? openFrontCamera(video)
+    ? openFrontCamera(video, settings.cameraFormat)
     : Promise.reject(new Error('Camera API unavailable (needs HTTPS and a supported browser).'));
   errorEl.hidden = true;
   mode = 'camera';
@@ -667,6 +669,25 @@ function buildSettings() {
   const body = $('settingsBody');
   body.textContent = '';
   buildSliders(body, SLIDERS);
+
+  // Front-camera format: how much of the sensor Safari delivers (field of view). Applying
+  // a new format restarts the page so the camera and trackers start fresh.
+  const fmtRow = document.createElement('div');
+  fmtRow.className = 'setting';
+  const options = Object.keys(CAMERA_FORMATS)
+    .map((k) => `<option value="${k}"${k === settings.cameraFormat ? ' selected' : ''}>${k}</option>`)
+    .join('');
+  fmtRow.innerHTML =
+    `<label for="set-cameraFormat">Front camera format</label><output></output>` +
+    `<select id="set-cameraFormat">${options}</select>` +
+    `<span class="hint">Pick the one whose preview shows the most of the room. Reloads the page.</span>`;
+  fmtRow.querySelector('select').addEventListener('change', (e) => {
+    settings.cameraFormat = e.target.value;
+    saveSettings();
+    location.reload();
+  });
+  body.appendChild(fmtRow);
+
   for (const s of TOGGLES) {
     const row = document.createElement('label');
     row.className = 'setting toggle';
