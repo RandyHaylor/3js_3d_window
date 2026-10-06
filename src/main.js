@@ -47,7 +47,8 @@ const DEFAULTS = {
   worldScale: 1,
   smoothing: 1,
   flipX: false,
-  useIris: false,
+  useIris: true, // iris diameter (11.7 mm) is the physical reference for eye scale
+  autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
   useOrientation: true,
   showPreview: false,
   phoneTracking: true,
@@ -82,9 +83,11 @@ const TOGGLES = [
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
   { key: 'phoneTracking', label: 'Phone tracking (AlvaAR room tracking)' },
+  { key: 'autoEyeCal', label: 'Automatic eye correction (experimental; assumes a still head)' },
 ];
 
-const STORAGE_KEY = '3d-window-settings-v1';
+// v2: new defaults (iris scale, no automatic eye correction); v1 values are not carried over.
+const STORAGE_KEY = '3d-window-settings-v2';
 const settings = { ...DEFAULTS, ...loadSettings() };
 
 function loadSettings() {
@@ -192,13 +195,16 @@ const eyeRaw = neutralEye();
 const camInScreen = () => [0, screenM.h / 2 + settings.camOffsetMm / 1000, 0];
 
 // Apply the eye correction: lateral offsets are rescaled, and distance from the camera
-// follows the fitted depth model true = b·raw + δ.
+// follows the depth model true = b·raw + δ. Scales come from the automatic fit only when
+// it is enabled; the distance offset δ is always applied (manual slider or fit).
 function correctEye(raw) {
   const c = camInScreen();
+  const lateral = settings.autoEyeCal ? settings.eyeLateral : 1;
+  const depth = settings.autoEyeCal ? settings.eyeDepth : 1;
   return {
-    x: c[0] + (raw.x - c[0]) * settings.eyeLateral,
-    y: c[1] + (raw.y - c[1]) * settings.eyeLateral,
-    z: c[2] + (raw.z - c[2]) * settings.eyeDepth + settings.eyeDepthOffset,
+    x: c[0] + (raw.x - c[0]) * lateral,
+    y: c[1] + (raw.y - c[1]) * lateral,
+    z: c[2] + (raw.z - c[2]) * depth + settings.eyeDepthOffset,
   };
 }
 
@@ -383,7 +389,7 @@ function updateCamera(t) {
     eyeAnchor = [s.center[0] + e[0], s.center[1] + e[1], s.center[2] + e[2]];
     view.source = 'AlvaAR';
     view.measuredQ = measured.q;
-    if (!track.lost) updateEyeCorrection(measured, t);
+    if (!track.lost && settings.autoEyeCal) updateEyeCorrection(measured, t);
   } else {
     // Handheld (rotation data present): the head is the steady thing, so the eye stays
     // anchored and the phone's placement is derived from it. Fixed monitor (no rotation
@@ -519,7 +525,11 @@ function renderDebug() {
       const fitText = f
         ? `last fit ${f.lateral.toFixed(2)}/${f.depth.toFixed(2)}/${(f.offset * 100).toFixed(1)}cm rms ${(f.rms * 100).toFixed(1)} cm`
         : 'no fit yet';
-      lines.push(`eye corr    lateral ${settings.eyeLateral.toFixed(2)} depth ${settings.eyeDepth.toFixed(2)}  ${fitText}`);
+      lines.push(
+        settings.autoEyeCal
+          ? `eye corr    lateral ${settings.eyeLateral.toFixed(2)} depth ${settings.eyeDepth.toFixed(2)}  ${fitText}`
+          : `eye corr    auto off: lateral 1, depth 1, offset ${(settings.eyeDepthOffset * 100).toFixed(1)} cm`
+      );
       lines.push(...guidepostLines());
     }
   }
