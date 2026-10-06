@@ -51,6 +51,7 @@ const DEFAULTS = {
   useOrientation: true,
   showPreview: false,
   phoneTracking: true,
+  showStats: false, // stats drawer (top-left ▾)
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
@@ -472,8 +473,23 @@ function guidepostLines() {
   return lines;
 }
 
+const debugToggle = $('debugToggle');
+function setStatsOpen(open) {
+  settings.showStats = open;
+  debugEl.hidden = !open;
+  debugToggle.setAttribute('aria-expanded', String(open));
+  debugToggle.setAttribute('aria-label', open ? 'Hide stats' : 'Show stats');
+}
+debugToggle.addEventListener('click', () => {
+  setStatsOpen(!settings.showStats);
+  if (settings.showStats) renderDebug();
+  saveSettings();
+});
+setStatsOpen(settings.showStats);
+
 const euler = new THREE.Euler();
 function renderDebug() {
+  if (debugEl.hidden) return;
   const cm = (v) => (v * 100).toFixed(1).padStart(6);
   const deg = (r) => ((r * 180) / Math.PI).toFixed(0).padStart(4);
   const offAxis = Math.atan2(Math.hypot(eye.x, eye.y), eye.z);

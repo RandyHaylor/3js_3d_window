@@ -130,6 +130,20 @@ button:active { transform: scale(0.97); }
   gap: 10px;
 }
 
+#debugToggle {
+  position: absolute;
+  left: calc(10px + env(safe-area-inset-left));
+  top: calc(10px + env(safe-area-inset-top));
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  background: var(--panel);
+  transition: transform 0.15s;
+}
+#debugToggle[aria-expanded="true"] { transform: rotate(180deg); }
+
 #debug {
   position: absolute;
   left: calc(10px + env(safe-area-inset-left));
@@ -148,10 +162,10 @@ button:active { transform: scale(0.97); }
   position: absolute;
   left: calc(10px + env(safe-area-inset-left));
   bottom: calc(72px + env(safe-area-inset-bottom));
-  width: min(45vw, 240px);
+  width: min(26vw, 130px);
   height: auto;
-  border-radius: 8px;
-  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
   pointer-events: none;
 }
 
