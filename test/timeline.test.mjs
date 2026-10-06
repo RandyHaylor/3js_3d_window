@@ -29,6 +29,17 @@ test('rotation history interpolates between samples and clamps outside them', ()
   near(2 * Math.asin(h.at(9).y), 0.4, 1e-9);
 });
 
+test('rotation history only counts as covering a time with samples close on both sides', () => {
+  const h = new RotationHistory();
+  h.push(1, yaw(0));
+  h.push(1.016, yaw(0.01));
+  h.push(1.2, yaw(0.02)); // a 184 ms gap in the sensor stream
+  assert.ok(h.covers(1.008, 0.03));
+  assert.equal(h.covers(1.1, 0.03), false); // inside the gap
+  assert.equal(h.covers(1.25, 0.03), false); // after the newest sample: not arrived yet
+  assert.equal(h.covers(0.9, 0.03), false); // before the oldest
+});
+
 // The phone wobbles (yaw and pitch) at 60 Hz sensor rate; the head stays still at E. The
 // camera runs at 24 fps and each frame is stamped `delay` seconds after it was captured.
 function simulate(delay, seconds = 3, noise = 0) {

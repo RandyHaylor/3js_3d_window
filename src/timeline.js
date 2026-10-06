@@ -43,6 +43,17 @@ export class RotationHistory {
     while (s.length > 2 && s[0].t < t - this.keep) s.shift();
   }
 
+  // True if real samples lie within `window` seconds before AND after t, so the rotation
+  // at t is interpolated, not guessed (a gap, or t not yet reached by the stream, fails).
+  covers(t, window) {
+    const s = this.samples;
+    if (!s.length || t < s[0].t || t > s[s.length - 1].t) return false;
+    let i = 0;
+    while (i < s.length - 1 && s[i + 1].t <= t) i++;
+    const after = s[i].t === t ? s[i] : s[i + 1];
+    return t - s[i].t <= window && after.t - t <= window;
+  }
+
   // Rotation at time t, or null with no samples.
   at(t) {
     const s = this.samples;
