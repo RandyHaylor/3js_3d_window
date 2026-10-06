@@ -60,15 +60,6 @@ const DEFAULTS = {
 };
 
 const SLIDERS = [
-  { key: 'pxPerInch', label: 'Screen density', unit: 'css px/in', min: 70, max: 220, step: 1, hint: 'Sets the physical size of the window.' },
-  { key: 'ipdMm', label: 'Eye spacing (IPD)', unit: 'mm', min: 50, max: 76, step: 0.5 },
-  { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the distance readout against a ruler.' },
-  { key: 'camOffsetMm', label: 'Camera above screen top', unit: 'mm', min: -20, max: 30, step: 0.5 },
-  { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
-];
-// Quick-access sliders in the top-corner Adjust drawer.
-const ADJUST = [
-  { key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 },
   {
     key: 'eyeDepthOffset',
     label: 'Distance offset',
@@ -78,6 +69,12 @@ const ADJUST = [
     step: 0.005,
     hint: 'Added to the measured eye distance. Raise it if leaning in changes the view too much.',
   },
+  { key: 'worldScale', label: 'World scale', unit: '×', min: 0.1, max: 2, step: 0.01, hint: 'Size of the virtual objects; 1 m stays 1 m.' },
+  { key: 'pxPerInch', label: 'Screen density', unit: 'css px/in', min: 70, max: 220, step: 1, hint: 'Sets the physical size of the window.' },
+  { key: 'ipdMm', label: 'Eye spacing (IPD)', unit: 'mm', min: 50, max: 76, step: 0.5 },
+  { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the distance readout against a ruler.' },
+  { key: 'camOffsetMm', label: 'Camera above screen top', unit: 'mm', min: -20, max: 30, step: 0.5 },
+  { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
 ];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
@@ -701,22 +698,8 @@ $('settingsClose').addEventListener('click', () => setSettingsOpen(false));
 $('settingsReset').addEventListener('click', () => {
   Object.assign(settings, DEFAULTS);
   buildSettings();
-  buildAdjust();
   for (const key of Object.keys(DEFAULTS)) onSettingChanged(key);
 });
 
-function buildAdjust() {
-  const body = $('adjustBody');
-  body.textContent = '';
-  buildSliders(body, ADJUST);
-}
-
-const adjustPanel = $('adjustPanel');
-$('adjustToggle').addEventListener('click', () => {
-  adjustPanel.hidden = !adjustPanel.hidden;
-  $('adjustToggle').setAttribute('aria-expanded', String(!adjustPanel.hidden));
-});
-
 buildSettings();
-buildAdjust();
 video.classList.toggle('preview', settings.showPreview);

@@ -169,24 +169,6 @@ button:active { transform: scale(0.97); }
   pointer-events: none;
 }
 
-#adjust {
-  position: absolute;
-  top: calc(10px + env(safe-area-inset-top));
-  right: calc(10px + env(safe-area-inset-right));
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-}
-#adjustToggle { padding: 5px 12px; font-size: 13px; background: var(--panel); }
-#adjustPanel {
-  width: min(240px, calc(100vw - 32px));
-  background: var(--panel);
-  border-radius: 12px;
-  padding: 2px 12px;
-}
-#adjustPanel .setting { margin: 8px 0; }
-
 #settings {
   position: fixed;
   left: 0;
