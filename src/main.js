@@ -27,6 +27,7 @@ import {
   windowCamera,
   eyeInWorld,
   levelUp,
+  keystone,
 } from './viewModel.js';
 import { Vec3Filter, OutlierGate } from './filters.js';
 import { FaceTracker, openFrontCamera, availableCameraSizes } from './faceTracker.js';
@@ -148,6 +149,42 @@ const { scene, setWorldScale } = createScene();
 const camera = new THREE.PerspectiveCamera();
 camera.matrixAutoUpdate = true;
 
+// Keystone pass: the scene is rendered into renderTarget (wide enough to cover the tilted
+// screen), then warped onto the screen so each screen point shows the camera image along
+// the eye's ray through it (viewModel.keystone).
+const renderTarget = new THREE.WebGLRenderTarget(1, 1, { samples: 4 });
+const keystoneH = new THREE.Matrix3();
+const keystoneMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: renderTarget.texture }, H: { value: keystoneH }, cover: { value: 1 } },
+  vertexShader: `
+    varying vec2 vNdc;
+    void main() {
+      vNdc = position.xy;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }`,
+  fragmentShader: `
+    uniform sampler2D tex;
+    uniform mat3 H;
+    uniform float cover;
+    varying vec2 vNdc;
+    void main() {
+      vec3 c = H * vec3(vNdc, 1.0);
+      vec2 ndc = c.xy / c.z / cover;
+      if (c.z <= 0.0 || abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+      } else {
+        gl_FragColor = texture2D(tex, ndc * 0.5 + 0.5);
+      }
+      #include <colorspace_fragment>
+    }`,
+  depthTest: false,
+  depthWrite: false,
+});
+const keystoneScene = new THREE.Scene();
+keystoneScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), keystoneMat));
+const keystoneCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const drawSize = new THREE.Vector2();
+
 // Real-world sizes (meters). The display's physical size comes from the iPhone table, or
 // the fallback height (2.5 in mobile, 8 in desktop). The visible page we render into is the
 // fraction of the display it covers. Screen values are only ever used as ratios.
@@ -155,6 +192,8 @@ let displayM = { w: 0.07, h: 0.15, known: false };
 let screenM = { w: 0.07, h: 0.15 }; // the visible page = the window
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
+  renderer.getDrawingBufferSize(drawSize);
+  renderTarget.setSize(drawSize.x, drawSize.y);
   // Orient the screen's values like the page (iOS reports screen size in portrait).
   const landscape = innerWidth > innerHeight;
   const sw = landscape ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
@@ -598,10 +637,18 @@ function updateCamera(t) {
   const ds = dirFilter.filter({ x: wc.dir[0], y: wc.dir[1], z: wc.dir[2] }, t);
   const dl = Math.hypot(ds.x, ds.y, ds.z);
   const dir = [ds.x / dl, ds.y / dl, ds.z / dl];
+  const up = levelUp(dir);
   camera.position.fromArray(phonePos);
-  camera.up.fromArray(levelUp(dir));
+  camera.up.fromArray(up);
   camera.lookAt(phonePos[0] + dir[0], phonePos[1] + dir[1], phonePos[2] + dir[2]);
-  camera.fov = wc.fovDeg;
+  // Keystone: the screen's tilt (newest phone rotation; it may run ahead of the camera
+  // frames) warps the image. The camera renders `cover` times wider so the warp has image
+  // for the whole tilted screen; its position, rotation and FOV are unchanged.
+  const k = keystone(eyeAnchor, phonePos, phoneRotation(), dir, up, wc.fovDeg, wc.aspect, screenM.w, screenM.h);
+  const cover = Math.min(k.cover, 4);
+  keystoneH.set(...k.H[0], ...k.H[1], ...k.H[2]);
+  keystoneMat.uniforms.cover.value = cover;
+  camera.fov = (2 * Math.atan(Math.tan((wc.fovDeg * Math.PI) / 360) * cover) * 180) / Math.PI;
   camera.aspect = wc.aspect;
   camera.near = 0.01;
   camera.far = FAR;
@@ -646,8 +693,12 @@ renderer.setAnimationLoop((nowMs) => {
   // lost eye stays where it was last seen.
   const hasEye = mode !== 'camera' || (tracker && eyeAnchor !== null);
   setWorldScale(settings.worldScale);
-  if (hasEye && updateCamera(t)) renderer.render(scene, camera);
-  else renderer.clear();
+  if (hasEye && updateCamera(t)) {
+    renderer.setRenderTarget(renderTarget);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    renderer.render(keystoneScene, keystoneCam);
+  } else renderer.clear();
 
   if (mode !== 'idle' && t - lastDebug > 0.25) {
     lastDebug = t;

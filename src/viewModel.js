@@ -116,6 +116,38 @@ export function windowCamera(eyeW, phoneW, w, h) {
   };
 }
 
+// Keystone correction: the screen is tilted relative to the eye → phone direction, so the
+// camera's image shown flat on it would look trapezoidal from the eye. Each screen point
+// must show what the camera sees along the ray from the eye through that point.
+//   eyeW, phoneW : eye and screen-center positions (world)
+//   q            : the phone's rotation (screen orientation, world)
+//   dir, up      : camera forward and up (unit, world); fovDeg/aspect: the camera's view
+//   w, h         : screen size (m)
+// Returns { H, cover }. H (3×3, rows) maps a screen point in NDC [nx, ny, 1] (±1 at the
+// screen edges) to homogeneous camera NDC [X, Y, Z]: the camera image point is (X/Z, Y/Z).
+// cover ≥ 1: how much wider than ±1 the camera image must be to cover the screen corners.
+export function keystone(eyeW, phoneW, q, dir, up, fovDeg, aspect, w, h) {
+  const right = normalize(cross(dir, up));
+  const camUp = cross(right, dir);
+  const tanH = Math.tan((fovDeg * Math.PI) / 360);
+  const ex = rotate(q, [w / 2, 0, 0]); // screen right edge offset, world
+  const ey = rotate(q, [0, h / 2, 0]); // screen top edge offset, world
+  const d = sub(phoneW, eyeW); // eye → screen center
+  const row = (axis, k) => [dot(ex, axis) / k, dot(ey, axis) / k, dot(d, axis) / k];
+  const H = [row(right, tanH * aspect), row(camUp, tanH), row(dir, 1)];
+  let cover = 1;
+  for (const [nx, ny] of [
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1],
+  ]) {
+    const c = H.map((r) => r[0] * nx + r[1] * ny + r[2]);
+    if (c[2] > 0) cover = Math.max(cover, Math.abs(c[0] / c[2]), Math.abs(c[1] / c[2]));
+  }
+  return { H, cover };
+}
+
 // Generalized perspective projection from eye pe through the screen corners.
 // Returns frustum extents at the near plane and the screen basis (vr right, vu up,
 // vn normal toward the eye). The camera sits at pe with orientation (vr, vu, vn).

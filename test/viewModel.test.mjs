@@ -12,6 +12,7 @@ import {
   screenFromPose,
   windowCamera,
   eyeInWorld,
+  keystone,
 } from '../src/viewModel.js';
 
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
@@ -110,6 +111,40 @@ test('camera roll stays level: up is world up, whatever the eye → phone direct
   near(dot3(down.up, down.dir), 0);
 });
 
+// Camera image NDC of world direction v, for a camera looking along dir with level up.
+function projectDir(v, dir, up, fovDeg, aspect) {
+  const right = normalize3(cross3(dir, up));
+  const camUp = cross3(right, dir);
+  const t = Math.tan((fovDeg * Math.PI) / 360);
+  const z = dot3(v, dir);
+  return [dot3(v, right) / z / (t * aspect), dot3(v, camUp) / z / t];
+}
+const apply = (H, nx, ny) => {
+  const c = H.map((r) => r[0] * nx + r[1] * ny + r[2]);
+  return [c[0] / c[2], c[1] / c[2]];
+};
+
+test('keystone: an untilted screen facing the eye needs no correction', () => {
+  const E = [0, 0, 0.4];
+  const cam = windowCamera(E, [0, 0, 0], W, H);
+  const k = keystone(E, [0, 0, 0], IDENTITY, cam.dir, cam.up, cam.fovDeg, cam.aspect, W, H);
+  for (const [nx, ny] of [[0.3, -0.7], [-1, 1], [1, 1]]) nearV(apply(k.H, nx, ny), [nx, ny]);
+  near(k.cover, 1, 1e-9);
+});
+
+test('keystone: each point of a tilted screen shows the camera image along the eye ray through it', () => {
+  const E = [0.03, 0.02, 0.38];
+  const P = [0.01, -0.01, 0];
+  const q = qmul(yaw(25), { x: Math.sin(0.15), y: 0, z: 0, w: Math.cos(0.15) }); // yawed and pitched
+  const cam = windowCamera(E, P, W, H);
+  const k = keystone(E, P, q, cam.dir, cam.up, cam.fovDeg, cam.aspect, W, H);
+  for (const [nx, ny] of [[-1, -1], [1, -1], [-1, 1], [1, 1], [0.2, 0.5]]) {
+    const S = add3(P, rotate(q, [(nx * W) / 2, (ny * H) / 2, 0])); // the physical screen point
+    nearV(apply(k.H, nx, ny), projectDir(sub3(S, E), cam.dir, cam.up, cam.fovDeg, cam.aspect));
+  }
+  assert.ok(k.cover > 1); // a tilted screen's corners reach outside the plain view
+});
+
 test('screen pose is recovered from the tracked front-camera pose', () => {
   // A screen yawed 30° with its center at P; the camera sits 8 cm above the center.
   const qS = yaw(30);
@@ -156,4 +191,11 @@ function sub3(a, b) {
 }
 function dot3(a, b) {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+function cross3(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function normalize3(a) {
+  const l = Math.hypot(...a);
+  return a.map((v) => v / l);
 }
