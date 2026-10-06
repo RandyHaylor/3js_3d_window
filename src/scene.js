@@ -4,6 +4,9 @@ import * as THREE from 'three';
 // z=0 plane; most of the room lies behind it (-z) but it also wraps around the
 // viewer so rotating the phone reveals the side walls.
 const ROOM = { x0: -0.4, x1: 0.4, y0: -0.4, y1: 0.28, z0: -1.0, z1: 0.6 };
+// The room and everything in it is built at the sizes below and then scaled up so the
+// back wall sits 6 ft (1.83 m) behind the screen. 1 virtual meter = 1 real meter after this.
+const SCENE_SCALE = 1.83;
 // Height the objects are arranged on. Kept above the floor so the floor sits well
 // below the screen's lower edge while the objects stay in view.
 const BASE_Y = -0.16;
@@ -153,7 +156,7 @@ function buildObjects() {
 export function createScene() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x07080f);
-  scene.fog = new THREE.Fog(0x07080f, 0.9, 2.4);
+  scene.fog = new THREE.Fog(0x07080f, 2.5, 6); // distances from the eye; back wall ≈ 2.2 m
 
   const world = new THREE.Group(); // scaled by the "world scale" setting
   scene.add(world);
@@ -166,16 +169,17 @@ export function createScene() {
   key.castShadow = true;
   key.shadow.mapSize.set(1024, 1024);
   key.shadow.camera.near = 0.01;
-  key.shadow.camera.far = 3;
+  key.shadow.camera.far = 8;
   key.shadow.bias = -0.002;
   world.add(key);
   const fill = new THREE.DirectionalLight(0x8fb8ff, 0.6);
   fill.position.set(0.3, 0.5, 0.5);
   world.add(fill);
 
-  // Uniformly resize the world. The point light falls off with distance, so its
-  // intensity is compensated to keep brightness the same.
-  function setWorldScale(s) {
+  // Uniformly resize the world (the user's World scale on top of SCENE_SCALE). The point
+  // light falls off with distance, so its intensity is compensated to keep brightness.
+  function setWorldScale(userScale) {
+    const s = userScale * SCENE_SCALE;
     world.scale.setScalar(s);
     key.intensity = 1.6 * Math.pow(s, 1.2);
   }

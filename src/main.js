@@ -65,9 +65,9 @@ const SLIDERS = [
     key: 'eyeDepthOffset',
     label: 'Distance offset',
     unit: 'm',
-    min: -0.1,
-    max: 0.3,
-    step: 0.005,
+    min: -1,
+    max: 3,
+    step: 0.01,
     hint: 'Added to the measured eye distance. Raise it if leaning in changes the view too much.',
   },
   { key: 'worldScale', label: 'World scale', unit: '×', min: 0.1, max: 2, step: 0.01, hint: 'Size of the virtual objects; 1 m stays 1 m.' },
@@ -149,9 +149,7 @@ const neutralEye = () => ({ x: 0, y: 0, z: IS_PHONE ? 0.33 : 0.6 });
 const eye = neutralEye();
 const simEye = neutralEye();
 
-// The eye in the WORLD frame: the anchor everything is built from. Set when the eye is
-// first seen and on Center. Phone movement isn't sensed, so the head is held still here
-// and the phone's world position is derived from it.
+// The eye in the WORLD frame, placed each frame from the window (phone pose) by face tracking.
 let eyeAnchor = null;
 const phoneQ = new THREE.Quaternion();
 const view = { phoneW: [0, 0, 0], d: 0, source: '' }; // for the debug readout
@@ -368,7 +366,10 @@ function measuredPhonePose() {
     alvaRef = null;
   }
   const cam = alvaCameraPose(pt.pose);
-  if (!alvaRef) alvaRef = cam;
+  if (!alvaRef) {
+    alvaRef = cam;
+    orient.center(); // AlvaAR and motion-sensor references must be the same moment
+  }
   const ref = screenPoseFromCamera(alvaRef.q, alvaRef.t, k, camInScreen());
   const now = screenPoseFromCamera(cam.q, cam.t, k, camInScreen());
   return relativePose(ref, now);
@@ -382,22 +383,23 @@ function updateCamera(t) {
 
   const measured = measuredPhonePose();
   if (measured) {
-    // Measured phone pose: the screen's corners are where the phone really is, and the
-    // eye is placed from the phone by face tracking. Nothing is assumed to stay still.
-    s = screenFromPose(measured.p, measured.q, screenM.w, screenM.h);
-    const e = rotate(measured.q, eyeS);
+    // The window is the phone's pose in the world: position from AlvaAR, rotation from the
+    // motion sensors when available (AlvaAR's rotation otherwise). The eye is then placed
+    // from the window by face tracking; it never moves the window.
+    const useImu = settings.useOrientation && orient.hasData;
+    const q = useImu ? { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w } : measured.q;
+    s = screenFromPose(measured.p, q, screenM.w, screenM.h);
+    const e = rotate(q, eyeS);
     eyeAnchor = [s.center[0] + e[0], s.center[1] + e[1], s.center[2] + e[2]];
     view.source = 'AlvaAR';
     view.measuredQ = measured.q;
     if (!track.lost && settings.autoEyeCal) updateEyeCorrection(measured, t);
   } else {
-    // Handheld (rotation data present): the head is the steady thing, so the eye stays
-    // anchored and the phone's placement is derived from it. Fixed monitor (no rotation
-    // data): the screen is the steady thing, so it stays at the origin and the eye moves.
-    const handheld = settings.useOrientation && orient.hasData;
-    if (!eyeAnchor || !handheld) eyeAnchor = rotate(phoneQ, eyeS);
+    // No measured position: the phone stays at the world origin. Its rotation (if used)
+    // only turns the window; the eye is always placed from the phone by face tracking.
+    eyeAnchor = rotate(phoneQ, eyeS);
     s = screenInWorld(eyeAnchor, phoneQ, eyeS, screenM.w, screenM.h);
-    view.source = handheld ? 'head held still' : 'fixed screen';
+    view.source = settings.useOrientation && orient.hasData ? 'phone fixed, rotation on' : 'phone fixed';
   }
 
   const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR);
