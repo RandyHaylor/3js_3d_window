@@ -21,10 +21,11 @@ import {
 } from './calibration.js';
 import {
   rotate,
+  qmul,
   screenPoseFromCamera,
   relativePose,
-  screenFromPose,
   windowCamera,
+  eyeInWorld,
 } from './viewModel.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera, availableCameraSizes } from './faceTracker.js';
@@ -44,7 +45,7 @@ const DEFAULTS = {
   fovDeg: knownFrontCameraFov(screen.width, screen.height, devicePixelRatio) ?? 70,
   camGapMm: 0, // fine adjustment of the front camera's position, from the display's top edge
   worldScale: 1,
-  smoothing: 1,
+  smoothing: 4,
   flipX: false,
   useIris: true, // iris diameter (11.7 mm) is the physical reference for eye scale
   autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
@@ -82,7 +83,7 @@ const SLIDERS = [
     step: 0.5,
     hint: 'The front camera sits half the display height above its center; this fine-tunes that.',
   },
-  { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
+  { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 30, step: 0.1, hint: 'Lower = steadier, higher = snappier.' },
 ];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
@@ -167,14 +168,22 @@ const neutralEye = () => ({ x: 0, y: 0, z: IS_PHONE ? 0.33 : 0.6 });
 const eye = neutralEye();
 const simEye = neutralEye();
 
-// The eye in the WORLD frame, placed each frame from the window (phone pose) by face tracking.
+// The eye in the WORLD frame. It changes only when face tracking measures the eye; while
+// the eyes aren't visible it stays where it was last seen.
 let eyeAnchor = null;
 const phoneQ = new THREE.Quaternion();
 const view = { phoneW: [0, 0, 0], d: 0, source: '' }; // for the debug readout
 
 const filter = new Vec3Filter();
+// Smooths the eye's WORLD position (eyeAnchor). Smoothing after the phone rotation is
+// applied keeps a still head still while the phone turns. World z is roughly the viewing
+// depth (the viewer faces the phone at Recenter), so it gets the depth settings.
+const worldEyeFilter = new Vec3Filter();
 function applySmoothing() {
-  filter.setParams({ minCutoff: settings.smoothing, beta: 8 }, { minCutoff: settings.smoothing * 0.6, beta: 4 });
+  const xy = { minCutoff: settings.smoothing, beta: 8 };
+  const z = { minCutoff: settings.smoothing * 0.6, beta: 4 };
+  filter.setParams(xy, z);
+  worldEyeFilter.setParams(xy, z);
 }
 applySmoothing();
 
@@ -389,12 +398,19 @@ function updateTracking(t, nowMs) {
     if (e) {
       if (track.lost) {
         filter.reset();
+        worldEyeFilter.reset();
         track.lost = false;
       }
       track.lastSeen = t;
       track.ipdPx = e.ipdPx;
       Object.assign(eyeRaw, filter.filter(e, t));
       Object.assign(eye, correctEye(eyeRaw));
+      // The eye's world position: this measurement (unsmoothed) placed by the phone's
+      // position and rotation now, then smoothed in the world.
+      const m = correctEye(e);
+      const wp = eyeInWorld(phonePos, phoneRotation(), [m.x, m.y, m.z]);
+      const w = worldEyeFilter.filter({ x: wp[0], y: wp[1], z: wp[2] }, t);
+      eyeAnchor = [w.x, w.y, w.z];
     }
   }
   if (t - track.lastSeen > LOST_AFTER) track.lost = true;
@@ -424,6 +440,7 @@ function updateTracking(t, nowMs) {
 const alvaM = new THREE.Matrix4();
 const alvaQ = new THREE.Quaternion();
 let alvaRef = null; // raw camera pose at Recenter; the screen pose there becomes the origin
+let alvaRefQ = null; // the phone's rotation (motion sensors) at that moment
 let alvaResets = 0;
 
 function alvaCameraPose(pose) {
@@ -432,7 +449,9 @@ function alvaCameraPose(pose) {
   return { q: { x: -alvaQ.x, y: alvaQ.y, z: alvaQ.z, w: alvaQ.w }, t: [pose[12], -pose[13], -pose[14]] };
 }
 
-// Screen pose in our world (meters, relative to the Recenter pose) from AlvaAR, or null.
+// Screen pose in our world (meters) from AlvaAR, or null. AlvaAR's motion is measured
+// from its reference pose and turned into the world by the phone's rotation at that
+// reference moment, so a new AlvaAR map doesn't change the world's axes.
 function measuredPhonePose() {
   const pt = phoneTracker;
   const k = motionScale.scale; // meters per AlvaAR unit; null until calibrated
@@ -444,11 +463,12 @@ function measuredPhonePose() {
   const cam = alvaCameraPose(pt.pose);
   if (!alvaRef) {
     alvaRef = cam;
-    orient.center(); // AlvaAR and motion-sensor references must be the same moment
+    alvaRefQ = phoneRotation();
   }
   const ref = screenPoseFromCamera(alvaRef.q, alvaRef.t, k, camInScreen());
   const now = screenPoseFromCamera(cam.q, cam.t, k, camInScreen());
-  return relativePose(ref, now);
+  const rel = relativePose(ref, now);
+  return { q: qmul(alvaRefQ, rel.q), p: rotate(alvaRefQ, rel.p) };
 }
 
 // The phone's position in the world. This is the camera position. It starts at the origin
@@ -456,16 +476,22 @@ function measuredPhonePose() {
 let phonePos = [0, 0, 0];
 let lastTrackedP = null; // AlvaAR's previous phone position, to take frame-to-frame deltas
 
+// The phone's rotation since Recenter (identity without motion sensors, e.g. a computer
+// screen). Used ONLY to place face-tracked eye measurements in the world.
+function phoneRotation() {
+  if (settings.useOrientation && orient.hasData) orient.relative(phoneQ);
+  else phoneQ.identity();
+  return { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w };
+}
+
 // The camera:
 //   position = phone position in space
-//   rotation = the eye → phone vector
-//   FOV      = from the eye → phone distance and the display's width and height
-// The eye position is only used for the rotation and the FOV. It never moves the camera.
+//   rotation = the eye → phone vector (eyeAnchor → phone), roll level with world up
+//   FOV      = from the eye → phone distance and the display's height
+// The phone's rotation is not used here. It only places eye measurements in the world
+// (updateTracking), so it never turns the camera by itself.
 function updateCamera(t) {
   const sensors = settings.useOrientation && orient.hasData;
-  if (sensors) orient.relative(phoneQ);
-  else phoneQ.identity(); // no motion sensors (e.g. a computer screen): the screen is fixed
-  const q = { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w };
 
   // Phone position: AlvaAR's motion is applied only while the accelerometer shows the
   // phone itself moving. While AlvaAR isn't sending, the position holds. Without motion
@@ -483,12 +509,11 @@ function updateCamera(t) {
     lastTrackedP = null;
   }
 
-  const s = screenFromPose(phonePos, q, screenM.w, screenM.h);
-  // Where the eye is, relative to the phone: used only for the camera's rotation and FOV.
-  const e = rotate(q, [eye.x, eye.y, eye.z]);
-  eyeAnchor = [phonePos[0] + e[0], phonePos[1] + e[1], phonePos[2] + e[2]];
+  // Simulated eye: a new "measurement" every frame.
+  if (mode === 'sim') eyeAnchor = eyeInWorld(phonePos, phoneRotation(), [eye.x, eye.y, eye.z]);
+  if (!eyeAnchor) return false;
 
-  const wc = windowCamera(eyeAnchor, s, screenM.w, screenM.h);
+  const wc = windowCamera(eyeAnchor, phonePos, screenM.w, screenM.h);
   if (!(wc.dist > 0.02)) return false;
   camera.position.fromArray(phonePos);
   camera.up.fromArray(wc.up);
@@ -520,6 +545,9 @@ function recenter() {
   phonePos = [0, 0, 0]; // phone (camera) back at the world origin
   lastTrackedP = null;
   alvaRef = null; // AlvaAR: the current pose becomes the reference
+  // The world is now the phone's current pose, so the eye is where the phone sees it.
+  if (eyeAnchor) eyeAnchor = [eye.x, eye.y, eye.z];
+  worldEyeFilter.reset();
 }
 
 // ---------- loop ----------
@@ -537,8 +565,9 @@ renderer.setAnimationLoop((nowMs) => {
   if (mode === 'camera') updateTracking(t, nowMs);
   else if (mode === 'sim') moveToward(eye, simEye, approach(dt, 0.05));
 
-  // Without the eye there is nothing meaningful to show.
-  const hasEye = mode !== 'camera' || (tracker && !track.lost);
+  // Until the eye has been seen once there is nothing meaningful to show. After that, a
+  // lost eye stays where it was last seen.
+  const hasEye = mode !== 'camera' || (tracker && eyeAnchor !== null);
   setWorldScale(settings.worldScale);
   if (hasEye && updateCamera(t)) renderer.render(scene, camera);
   else renderer.clear();

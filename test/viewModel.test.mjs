@@ -11,6 +11,7 @@ import {
   relativePose,
   screenFromPose,
   windowCamera,
+  eyeInWorld,
 } from '../src/viewModel.js';
 
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
@@ -71,18 +72,42 @@ test('a near plane at the screen distance puts the frustum edges exactly on the 
   near(p.top - p.bottom, H, 1e-9);
 });
 
-test('window camera: at the screen, looking from the eye through it, FOV from eye distance', () => {
-  const s = screenFromPose([0, 0, 0], IDENTITY, W, H);
-  const cam = windowCamera([0, 0, 0.4], s, W, H);
+test('window camera: at the phone, looking along eye → phone, FOV from eye distance', () => {
+  const cam = windowCamera([0, 0, 0.4], [0, 0, 0], W, H);
   nearV(cam.position, [0, 0, 0]);
-  nearV(cam.dir, [0, 0, -1]); // eye → screen points into the virtual space
+  nearV(cam.dir, [0, 0, -1]); // eye → phone points into the virtual space
   nearV(cam.up, [0, 1, 0]);
   near(cam.fovDeg, (2 * Math.atan(H / 2 / 0.4) * 180) / Math.PI);
   // Eye moved left: the camera turns to look right, through the window.
-  const left = windowCamera([-0.1, 0, 0.4], s, W, H);
+  const left = windowCamera([-0.1, 0, 0.4], [0, 0, 0], W, H);
   assert.ok(left.dir[0] > 0);
   // Eye closer: wider field of view.
-  assert.ok(windowCamera([0, 0, 0.2], s, W, H).fovDeg > cam.fovDeg);
+  assert.ok(windowCamera([0, 0, 0.2], [0, 0, 0], W, H).fovDeg > cam.fovDeg);
+});
+
+test('phone rotating in place with the head still does not turn the camera', () => {
+  // Head fixed at E, phone pivots about its own center at the origin. Face tracking sees
+  // the eye in the rotated phone's frame; the phone rotation places it back in the world.
+  const E = [0.04, 0.02, 0.35];
+  const still = windowCamera(eyeInWorld([0, 0, 0], IDENTITY, E), [0, 0, 0], W, H);
+  for (const q of [yaw(30), qmul(yaw(-20), { x: Math.sin(0.2), y: 0, z: 0, w: Math.cos(0.2) })]) {
+    const eyeS = rotate({ x: -q.x, y: -q.y, z: -q.z, w: q.w }, E);
+    const turned = windowCamera(eyeInWorld([0, 0, 0], q, eyeS), [0, 0, 0], W, H);
+    nearV(turned.dir, still.dir);
+    nearV(turned.up, still.up);
+    near(turned.fovDeg, still.fovDeg);
+  }
+});
+
+test('camera roll stays level: up is world up, whatever the eye → phone direction', () => {
+  const cam = windowCamera([0.1, 0.3, 0.2], [0, 0, 0], W, H);
+  near(dot3(cam.up, cam.dir), 0); // perpendicular to the view direction
+  assert.ok(cam.up[1] > 0); // and on the world-up side
+  near(cam.up[0] * cam.dir[2] - cam.up[2] * cam.dir[0], 0); // no sideways lean (no roll)
+  // Looking straight down (eye directly above the phone) still gives a usable up vector.
+  const down = windowCamera([0, 0.4, 0], [0, 0, 0], W, H);
+  near(Math.hypot(...down.up), 1);
+  near(dot3(down.up, down.dir), 0);
 });
 
 test('screen pose is recovered from the tracked front-camera pose', () => {

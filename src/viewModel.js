@@ -80,16 +80,32 @@ export function screenInWorld(eyeW, q, eyeS, w, h) {
   return { center, pa: at(-w / 2, -h / 2), pb: at(w / 2, -h / 2), pc: at(-w / 2, h / 2) };
 }
 
-// Window camera: the virtual camera sits at the window (screen center), looks along the
-// vector from the eye to the screen, and its field of view is the angle the screen
-// covers as seen from the eye. Returns { position, dir, up, fovDeg, aspect }.
-export function windowCamera(eyeW, screen, w, h) {
-  const toScreen = sub(screen.center, eyeW);
-  const dist = Math.hypot(toScreen[0], toScreen[1], toScreen[2]);
+// The eye's world position from a face-tracking measurement: the eye in the phone's frame
+// (eyeS), placed by the phone's position and rotation at that moment. This is the only
+// place the phone's rotation enters the view.
+export function eyeInWorld(phoneW, q, eyeS) {
+  return add(phoneW, rotate(q, eyeS));
+}
+
+const WORLD_UP = [0, 1, 0];
+const WORLD_BACK = [0, 0, 1];
+
+// Window camera: the virtual camera sits at the phone, its rotation is the eye → phone
+// vector (roll kept level with world up), and its field of view is the angle the screen
+// height covers from the eye's distance. The phone's rotation is not an input.
+// Returns { position, dir, up, fovDeg, aspect, dist }.
+export function windowCamera(eyeW, phoneW, w, h) {
+  const toPhone = sub(phoneW, eyeW);
+  const dist = Math.hypot(toPhone[0], toPhone[1], toPhone[2]);
+  const dir = toPhone.map((v) => v / dist);
+  // Up: world up with its component along dir removed. Looking (nearly) straight up or
+  // down, world up is unusable, so the world's back direction stands in.
+  const ref = Math.abs(dot(dir, WORLD_UP)) > 0.99 ? WORLD_BACK : WORLD_UP;
+  const up = normalize(sub(ref, dir.map((v) => v * dot(ref, dir))));
   return {
-    position: screen.center,
-    dir: toScreen.map((v) => v / dist),
-    up: normalize(sub(screen.pc, screen.pa)),
+    position: phoneW,
+    dir,
+    up,
     fovDeg: (2 * Math.atan(h / 2 / dist) * 180) / Math.PI,
     aspect: w / h,
     dist,
