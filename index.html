@@ -14,7 +14,7 @@
     // add new files in src/ to MODULES.
     (() => {
       const v = Date.now();
-      const MODULES = ['main', 'scene', 'faceTracker', 'phoneTracker', 'viewModel', 'windowMath', 'filters', 'orientation', 'calibration', 'frameSource'];
+      const MODULES = ['main', 'scene', 'faceTracker', 'phoneTracker', 'viewModel', 'windowMath', 'filters', 'orientation', 'calibration', 'frameSource', 'timeline'];
       const imports = { three: 'https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js' };
       for (const m of MODULES) imports[new URL(`src/${m}.js`, location.href).href] = `./src/${m}.js?v=${v}`;
       const map = document.createElement('script');

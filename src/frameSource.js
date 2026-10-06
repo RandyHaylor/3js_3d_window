@@ -12,6 +12,19 @@ export class FrameSource {
     this.ctx = null;
     this.lastTime = -1;
     this.ready = false; // true once the first frame has sized the canvas
+    // When the grabbed frame was captured (seconds, performance.now() timeline) and where
+    // that came from: 'capture' (the camera's own capture time), 'presented' (when the
+    // browser presented the frame) or 'grabbed' (when we copied it; no frame callback).
+    this.frameT = 0;
+    this.timeSource = 'grabbed';
+    this.meta = null; // latest per-frame metadata from requestVideoFrameCallback
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      const onFrame = (now, meta) => {
+        this.meta = meta;
+        video.requestVideoFrameCallback(onFrame);
+      };
+      video.requestVideoFrameCallback(onFrame);
+    }
   }
 
   get width() {
@@ -27,6 +40,22 @@ export class FrameSource {
     const v = this.video;
     if (v.readyState < 2 || !v.videoWidth || v.currentTime === this.lastTime) return false;
     this.lastTime = v.currentTime;
+    const m = this.meta;
+    if (m && typeof m.captureTime === 'number' && m.captureTime > 0) {
+      this.frameT = m.captureTime / 1000;
+      this.timeSource = 'capture';
+    } else if (m && typeof m.presentationTime === 'number' && m.presentationTime > 0) {
+      this.frameT = m.presentationTime / 1000;
+      this.timeSource = 'presented';
+    } else {
+      this.frameT = performance.now() / 1000;
+      this.timeSource = 'grabbed';
+    }
+    const now = performance.now() / 1000;
+    if (!(this.frameT <= now && now - this.frameT < 1)) {
+      this.frameT = now; // a time off this clock: use the grab time
+      this.timeSource = 'grabbed';
+    }
 
     const k = Math.min(1, Math.sqrt(TARGET_PIXELS / (v.videoWidth * v.videoHeight)));
     const w = Math.round(v.videoWidth * k);

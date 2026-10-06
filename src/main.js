@@ -32,7 +32,8 @@ import { Vec3Filter, OutlierGate } from './filters.js';
 import { FaceTracker, openFrontCamera, availableCameraSizes } from './faceTracker.js';
 import { PhoneTracker } from './phoneTracker.js';
 import { FrameSource } from './frameSource.js';
-import { OrientationTracker, requestOrientationPermission } from './orientation.js';
+import { OrientationTracker, requestOrientationPermission, eventTime } from './orientation.js';
+import { DelayEstimator } from './timeline.js';
 
 const FAR = 6;
 const LOST_AFTER = 0.25; // s without a face before the view is blanked
@@ -226,6 +227,10 @@ const distStats = { eyes: new Jitter(), eyes2d: new Jitter(), iris: new Jitter()
 
 // Meters per AlvaAR unit, from AlvaAR's motion vs. the accelerometer.
 const motionScale = new MotionScaleEstimator();
+
+// How long before a camera frame's reported time it was really captured (timeline.js).
+const cameraDelay = new DelayEstimator();
+let cameraDelayT = 0;
 // ---------- debug log (Send log in the stats drawer) ----------
 // The last LOG_SECONDS of raw inputs, so problems on the device can be analyzed exactly.
 const LOG_SECONDS = 20;
@@ -247,7 +252,7 @@ const phoneIsMoving = () => performance.now() / 1000 - phoneMotion.lastMovingT <
 addEventListener('devicemotion', (e) => {
   const a = e.acceleration; // without gravity, m/s²
   if (!a || a.x === null) return;
-  const t = performance.now() / 1000;
+  const t = eventTime(e); // when it was measured
   phoneMotion.hasData = true;
   motionScale.addImu([a.x, a.y, a.z], t);
   logImu(t, [a.x, a.y, a.z]);
@@ -370,6 +375,10 @@ function updateTracking(t, nowMs) {
     camRate.lastT = t;
   }
   const r = fresh ? tracker.detect(nowMs) : undefined;
+  // One pass per camera frame, everything at this frame's capture time (tc, on the motion
+  // sensors' clock): AlvaAR's phone position from this frame, the face tracker's eye from
+  // this frame, and the phone rotation interpolated to the same moment.
+  const tc = fresh ? frames.frameT - (cameraDelay.delay ?? 0) : t;
   // A new video frame arrived (r is null when it has no face).
   if (r !== undefined && phoneTracker) {
     const pt = phoneTracker;
@@ -378,8 +387,9 @@ function updateTracking(t, nowMs) {
       seenResets = pt.resets; // new map: new origin and new scale
       resetCalibration();
     }
-    if (pt.status === 'tracking' && pt.position) motionScale.addPosition(pt.position, performance.now() / 1000);
+    if (pt.status === 'tracking' && pt.position) motionScale.addPosition(pt.position, tc);
   }
+  if (fresh) updatePhonePosition(tc);
   if (fresh) {
     const pt = phoneTracker;
     debugLog.frames.push({
@@ -420,16 +430,23 @@ function updateTracking(t, nowMs) {
       }
       track.lastSeen = t;
       track.ipdPx = e.ipdPx;
-      Object.assign(eyeRaw, filter.filter(e, t));
+      Object.assign(eyeRaw, filter.filter(e, tc));
       Object.assign(eye, correctEye(eyeRaw));
       // The eye's world position: this measurement (unsmoothed) placed by the phone's
-      // position and rotation now, then smoothed in the world.
+      // position and rotation at this frame's capture time, then smoothed in the world.
       const m = correctEye(e);
-      const wp = eyeInWorld(phonePos, phoneRotation(), [m.x, m.y, m.z]);
+      const wp = eyeInWorld(phonePos, phoneRotationAt(tc), [m.x, m.y, m.z]);
       const measuredW = { x: wp[0], y: wp[1], z: wp[2] };
-      if (eyeGate.accept(measuredW, t)) {
-        const w = worldEyeFilter.filter(measuredW, t);
+      if (eyeGate.accept(measuredW, tc)) {
+        const w = worldEyeFilter.filter(measuredW, tc);
         eyeAnchor = [w.x, w.y, w.z];
+      }
+      // Camera delay: eye directions stamped with the frame's reported time (no delay
+      // applied), compared against the rotation history.
+      cameraDelay.add(frames.frameT, [m.x, m.y, m.z]);
+      if (t - cameraDelayT > 0.5) {
+        cameraDelayT = t;
+        cameraDelay.update(phoneRotationAt);
       }
     }
   }
@@ -472,7 +489,7 @@ function alvaCameraPose(pose) {
 // Screen pose in our world (meters) from AlvaAR, or null. AlvaAR's motion is measured
 // from its reference pose and turned into the world by the phone's rotation at that
 // reference moment, so a new AlvaAR map doesn't change the world's axes.
-function measuredPhonePose() {
+function measuredPhonePose(tc) {
   const pt = phoneTracker;
   const k = motionScale.scale; // meters per AlvaAR unit; null until calibrated
   if (!pt || pt.status !== 'tracking' || !pt.pose || k === null) return null;
@@ -483,7 +500,7 @@ function measuredPhonePose() {
   const cam = alvaCameraPose(pt.pose);
   if (!alvaRef) {
     alvaRef = cam;
-    alvaRefQ = phoneRotation();
+    alvaRefQ = phoneRotationAt(tc); // the rotation when this frame was captured
   }
   const ref = screenPoseFromCamera(alvaRef.q, alvaRef.t, k, camInScreen());
   const now = screenPoseFromCamera(cam.q, cam.t, k, camInScreen());
@@ -497,11 +514,46 @@ let phonePos = [0, 0, 0];
 let lastTrackedP = null; // AlvaAR's previous phone position, to take frame-to-frame deltas
 
 // The phone's rotation since Recenter (identity without motion sensors, e.g. a computer
-// screen). Used ONLY to place face-tracked eye measurements in the world.
+// screen). Used ONLY to place eye measurements in the world, never for the camera.
 function phoneRotation() {
   if (settings.useOrientation && orient.hasData) orient.relative(phoneQ);
   else phoneQ.identity();
   return { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w };
+}
+
+// The same at time t (seconds), interpolated from the timestamped orientation history.
+function phoneRotationAt(t) {
+  if (settings.useOrientation && orient.hasData) orient.relativeAt(t, phoneQ);
+  else phoneQ.identity();
+  return { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w };
+}
+
+// Phone position from AlvaAR's pose for the camera frame captured at tc. AlvaAR's motion
+// is applied only while the accelerometer shows the phone itself moving. While AlvaAR
+// isn't sending, the position holds. Without motion sensors it never changes.
+function updatePhonePosition(tc) {
+  const sensors = settings.useOrientation && orient.hasData;
+  const measured = sensors && phoneMotion.hasData ? measuredPhonePose(tc) : null;
+  const moving = phoneIsMoving();
+  if (measured) {
+    if (lastTrackedP && moving) {
+      for (let i = 0; i < 3; i++) phonePos[i] += measured.p[i] - lastTrackedP[i];
+    }
+    lastTrackedP = measured.p;
+    view.measuredQ = measured.q;
+    if (!track.lost && settings.autoEyeCal) updateEyeCorrection(measured, tc);
+  } else {
+    lastTrackedP = null;
+  }
+  view.source = !sensors
+    ? 'no motion sensors: phone fixed'
+    : !moving
+      ? 'phone at rest'
+      : measured
+        ? 'moving: AlvaAR'
+        : phoneTracker && phoneTracker.status === 'tracking' && motionScale.scale === null
+          ? 'moving: scale not calibrated, holding'
+          : 'moving: room not tracked, holding';
 }
 
 // The camera:
@@ -511,24 +563,6 @@ function phoneRotation() {
 // The phone's rotation is not used here. It only places eye measurements in the world
 // (updateTracking), so it never turns the camera by itself.
 function updateCamera(t) {
-  const sensors = settings.useOrientation && orient.hasData;
-
-  // Phone position: AlvaAR's motion is applied only while the accelerometer shows the
-  // phone itself moving. While AlvaAR isn't sending, the position holds. Without motion
-  // sensors the position never changes.
-  const measured = sensors && phoneMotion.hasData ? measuredPhonePose() : null;
-  const moving = phoneIsMoving();
-  if (measured) {
-    if (lastTrackedP && moving) {
-      for (let i = 0; i < 3; i++) phonePos[i] += measured.p[i] - lastTrackedP[i];
-    }
-    lastTrackedP = measured.p;
-    view.measuredQ = measured.q;
-    if (!track.lost && settings.autoEyeCal) updateEyeCorrection(measured, t);
-  } else {
-    lastTrackedP = null;
-  }
-
   // Simulated eye: a new "measurement" every frame.
   if (mode === 'sim') eyeAnchor = eyeInWorld(phonePos, phoneRotation(), [eye.x, eye.y, eye.z]);
   if (!eyeAnchor) return false;
@@ -550,15 +584,7 @@ function updateCamera(t) {
 
   view.phoneW = phonePos;
   view.d = wc.dist;
-  view.source = !sensors
-    ? 'no motion sensors: phone fixed'
-    : !moving
-      ? 'phone at rest'
-      : measured
-        ? 'moving: AlvaAR'
-        : phoneTracker && phoneTracker.status === 'tracking' && motionScale.scale === null
-          ? 'moving: scale not calibrated, holding'
-          : 'moving: room not tracked, holding';
+  if (mode === 'sim') view.source = orient.hasData && settings.useOrientation ? 'simulated eye' : 'no motion sensors: phone fixed';
   return true;
 }
 
@@ -698,6 +724,12 @@ function renderDebug() {
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
     lines.push(
       `camera: ${video.videoWidth}×${video.videoHeight} → processed ${frames.width}×${frames.height} at ${camRate.fps.toFixed(1)} fps  FOV setting ${settings.fovDeg}°`
+    );
+    // Input alignment: where each frame's time comes from, and the measured camera delay
+    // (needs some phone rotation with the head still to measure).
+    const delay = cameraDelay.delay;
+    lines.push(
+      `timing: frame time from ${frames.timeSource}, camera delay ${delay === null ? 'measuring (turn the phone a little)' : `${(delay * 1000).toFixed(0)} ms`}`
     );
     if (phoneTracker && view.measuredQ) {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
