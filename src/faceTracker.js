@@ -34,10 +34,10 @@ export function openFrontCamera(video) {
 }
 
 export class FaceTracker {
-  constructor(video) {
-    this.video = video;
+  // frames: a FrameSource (the downscaled camera frame shared with phone tracking).
+  constructor(frames) {
+    this.frames = frames;
     this.landmarker = null;
-    this.lastVideoTime = -1;
     this.delegate = null;
   }
 
@@ -60,15 +60,14 @@ export class FaceTracker {
     }
   }
 
-  // Returns undefined when there is no new video frame, null when no face is found,
-  // otherwise { box, a, b, irises, faceMatrix, videoW, videoH }: the face bounding box,
-  // the two iris centers, each iris's 4 boundary landmarks, and the metric (cm) face
-  // transform as a flat array.
+  // Run on the frame just grabbed by the FrameSource. Returns undefined before the model is
+  // ready, null when no face is found, otherwise { box, a, b, irises, faceMatrix, videoW,
+  // videoH }: the face bounding box, the two iris centers, each iris's 4 boundary landmarks,
+  // and the metric (cm) face transform as a flat array. videoW/H are the frame's size.
   detect(nowMs) {
-    const v = this.video;
-    if (!this.landmarker || v.readyState < 2 || v.currentTime === this.lastVideoTime) return undefined;
-    this.lastVideoTime = v.currentTime;
-    const res = this.landmarker.detectForVideo(v, nowMs);
+    if (!this.landmarker) return undefined;
+    const f = this.frames;
+    const res = this.landmarker.detectForVideo(f.canvas, nowMs);
     const lm = res.faceLandmarks?.[0];
     if (!lm || lm.length <= IRIS_B + 4) return null;
     let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
@@ -84,8 +83,8 @@ export class FaceTracker {
       b: lm[IRIS_B],
       irises: [lm.slice(IRIS_A + 1, IRIS_A + 5), lm.slice(IRIS_B + 1, IRIS_B + 5)],
       faceMatrix: res.facialTransformationMatrixes?.[0]?.data ?? null,
-      videoW: v.videoWidth,
-      videoH: v.videoHeight,
+      videoW: f.width,
+      videoH: f.height,
     };
   }
 }

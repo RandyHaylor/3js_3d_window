@@ -9,12 +9,11 @@ const FACE_PAD = 0.25; // grow the face box by this fraction on each side before
 const TORSO_PAD = 1.1; // shoulders: extend the mask this many face-widths to each side
 
 export class PhoneTracker {
-  // maxSide: processing resolution (long side, px).
-  constructor(video, maxSide = 640) {
-    this.video = video;
-    this.maxSide = maxSide;
-    this.canvas = document.createElement('canvas');
-    this.ctx = null;
+  // frames: the FrameSource shared with face tracking. AlvaAR runs on that same downscaled
+  // frame (after face tracking has used it), and the frame doubles as the preview.
+  constructor(frames) {
+    this.frames = frames;
+    this.canvas = frames.canvas;
     this.alva = null;
     this.status = 'loading';
     this.points = 0;
@@ -26,29 +25,31 @@ export class PhoneTracker {
 
   // fovLongDeg: camera field of view across the long side of the video.
   async init(fovLongDeg) {
-    const v = this.video;
-    const k = Math.min(1, this.maxSide / Math.max(v.videoWidth, v.videoHeight));
-    const w = (this.canvas.width = Math.round(v.videoWidth * k));
-    const h = (this.canvas.height = Math.round(v.videoHeight * k));
-    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    while (!this.frames.ready) await new Promise((r) => setTimeout(r, 50)); // first frame sizes it
+    const w = this.frames.width;
+    const h = this.frames.height;
 
     // AlvaAR applies its fov to the short side of the image.
     const shortFov =
       (2 * Math.atan(Math.tan((fovLongDeg * Math.PI) / 360) * (Math.min(w, h) / Math.max(w, h))) * 180) / Math.PI;
     const { AlvaAR } = await import(ALVA_URL);
     this.alva = await AlvaAR.Initialize(w, h, shortFov);
+    this.alvaW = w;
+    this.alvaH = h;
     this.status = 'initializing';
   }
 
-  // Process the current video frame. faceBox: normalized {x0, y0, x1, y1} or null.
+  // Process the frame just grabbed (face tracking must already have run on it, since the
+  // viewer is masked out in place). faceBox: normalized {x0, y0, x1, y1} or null.
   update(faceBox) {
     if (!this.alva) return;
     const t0 = performance.now();
-    const { canvas, ctx, alva } = this;
+    const { canvas, alva } = this;
+    const ctx = this.frames.ctx;
     const w = canvas.width;
     const h = canvas.height;
+    if (w !== this.alvaW || h !== this.alvaH) return; // frame size changed since AlvaAR started
 
-    ctx.drawImage(this.video, 0, 0, w, h);
     if (faceBox) {
       // Blank the viewer: head plus shoulders/torso down to the bottom of the frame, so
       // only the room is tracked (points on the viewer move with them, not the room).

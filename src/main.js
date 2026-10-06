@@ -30,6 +30,7 @@ import {
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
 import { PhoneTracker } from './phoneTracker.js';
+import { FrameSource } from './frameSource.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
 
 const NEAR = 0.005;
@@ -143,6 +144,7 @@ resize();
 
 let mode = 'idle'; // idle | camera | sim
 let tracker = null;
+const frames = new FrameSource(video); // full-FOV camera frame, downscaled once per frame
 const orient = new OrientationTracker();
 let orientState = 'off';
 
@@ -275,7 +277,7 @@ let seenResets = 0;
 
 function startPhoneTracker() {
   if (phoneTracker || mode !== 'camera' || !tracker || !settings.phoneTracking) return;
-  const pt = new PhoneTracker(video);
+  const pt = new PhoneTracker(frames);
   phoneTracker = pt;
   pt.canvas.className = 'alva-preview';
   hud.appendChild(pt.canvas);
@@ -293,7 +295,9 @@ function stopPhoneTracker() {
 
 // Face tracking → eye in the screen frame.
 function updateTracking(t, nowMs) {
-  const r = tracker ? tracker.detect(nowMs) : undefined;
+  // One downscale per new camera frame, shared by face and phone tracking.
+  const fresh = tracker ? frames.grab() : false;
+  const r = fresh ? tracker.detect(nowMs) : undefined;
   // A new video frame arrived (r is null when it has no face).
   if (r !== undefined && phoneTracker) {
     const pt = phoneTracker;
@@ -531,7 +535,9 @@ function renderDebug() {
     const d = distStats;
     lines.push(`dist cm  eyes ${d.eyes.text()}  2D ${d.eyes2d.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
-    lines.push(`camera: ${video.videoWidth}×${video.videoHeight} (widest 4:3 requested)  FOV setting ${settings.fovDeg}°`);
+    lines.push(
+      `camera: ${video.videoWidth}×${video.videoHeight} → processed ${frames.width}×${frames.height}  FOV setting ${settings.fovDeg}°`
+    );
     if (phoneTracker && view.source === 'AlvaAR') {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
       const mq = view.measuredQ;
@@ -594,7 +600,7 @@ $('start').addEventListener('click', () => {
   cam
     .then(async () => {
       setStatus('Loading face model…');
-      const ft = new FaceTracker(video);
+      const ft = new FaceTracker(frames);
       await ft.init();
       tracker = ft;
       startPhoneTracker();
