@@ -1069,7 +1069,19 @@ function buildSettings() {
     ).join('')}</select>`;
   const exSelect = exRow.querySelector('select');
   exSelect.addEventListener('change', (e) => {
-    settings.experience = e.target.value;
+    const v = e.target.value;
+    if (v.startsWith('local:')) {
+      // A model from the local model folder: load it into the model experience.
+      const m = localModels[Number(v.slice(6))];
+      settings.experience = 'model';
+      settings.modelUrl = m.url;
+      urlInput.value = m.url;
+      saveSettings();
+      setExperience('model');
+      showModel(m.url);
+      return;
+    }
+    settings.experience = v;
     applyExperience();
     saveSettings();
   });
@@ -1100,6 +1112,8 @@ function buildSettings() {
   });
   body.appendChild(modelRow);
   refreshModelStatus();
+  fillExperienceOptions();
+  refreshLocalModels();
 
   buildSliders(body, SLIDERS);
 
@@ -1180,7 +1194,42 @@ function onOffsetSlider() {
   saveSettings();
 }
 
+// Local models: one Experience entry per subfolder of the model folder on the dev server
+// (GET models/index.json, rescanned by the server on every request). Elsewhere (e.g.
+// GitHub Pages) the list is simply empty.
+let localModels = [];
+function refreshLocalModels() {
+  fetch('./models/index.json', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : []))
+    .catch(() => [])
+    .then((list) => {
+      localModels = Array.isArray(list)
+        ? list.filter((m) => m && m.name && m.url).map((m) => ({ name: m.name, url: new URL(m.url, location.href).href }))
+        : [];
+      fillExperienceOptions();
+    });
+}
+
+// The Experience dropdown: the built-in experiences, then "Model: <subfolder>" entries.
+function fillExperienceOptions() {
+  const sel = document.getElementById('set-experience');
+  if (!sel) return;
+  const localIdx = settings.experience === 'model' ? localModels.findIndex((m) => m.url === settings.modelUrl) : -1;
+  const current = localIdx >= 0 ? `local:${localIdx}` : settings.experience;
+  sel.textContent = '';
+  const add = (value, label) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    sel.appendChild(o);
+  };
+  for (const ex of EXPERIENCES) add(ex.key, ex.label);
+  localModels.forEach((m, i) => add(`local:${i}`, `Model: ${m.name}`));
+  sel.value = current;
+}
+
 function setSettingsOpen(open) {
+  if (open) refreshLocalModels();
   settingsPanel.hidden = !open;
   $('settingsToggle').setAttribute('aria-expanded', String(open));
 }
