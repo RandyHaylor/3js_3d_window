@@ -402,10 +402,14 @@ function updateCamera(t) {
     view.source = settings.useOrientation && orient.hasData ? 'phone fixed, rotation on' : 'phone fixed';
   }
 
-  const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR);
-  if (!(p.d > 0.02)) return false; // eye at or behind the screen plane
+  const d = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR).d; // eye → screen plane
+  if (!(d > 0.02)) return false; // eye at or behind the screen plane
+  // A window only shows what is behind it: the near clipping plane IS the screen plane,
+  // so anything between the viewer and the glass is clipped (cut at the frame).
+  const near = d * 0.999;
+  const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, near);
 
-  camera.projectionMatrix.makePerspective(p.left, p.right, p.top, p.bottom, NEAR, FAR);
+  camera.projectionMatrix.makePerspective(p.left, p.right, p.top, p.bottom, near, FAR);
   camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
   basis.makeBasis(vr.fromArray(p.vr), vu.fromArray(p.vu), vn.fromArray(p.vn));
   camera.quaternion.setFromRotationMatrix(basis);

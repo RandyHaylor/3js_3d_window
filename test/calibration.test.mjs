@@ -41,6 +41,29 @@ test('motion scale is recovered from tracker positions and the accelerometer', (
   assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.1, `scale ${est.scale} vs ${metersPerUnit}`);
 });
 
+test('motion scale survives realistic tracker jitter', () => {
+  // Tracker positions jitter by ~2 mm (in meters) frame to frame, as visual tracking does.
+  const metersPerUnit = 0.25;
+  const est = new MotionScaleEstimator();
+  let seed = 1;
+  const noise = () => {
+    // deterministic pseudo-random, roughly uniform in [-1, 1]
+    seed = (seed * 16807) % 2147483647;
+    return (seed / 2147483647) * 2 - 1;
+  };
+  let tv = 0;
+  for (let t = 0; t < 10; t += 0.01) {
+    est.addImu(waveAcc(t), t);
+    if (t >= tv) {
+      const p = wave(t).map((v) => v + 0.002 * noise());
+      est.addPosition(p.map((v) => v / metersPerUnit), t);
+      tv += 1 / 30;
+    }
+  }
+  assert.ok(est.scale !== null, 'expected an estimate');
+  assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.15, `scale ${est.scale} vs ${metersPerUnit}`);
+});
+
 test('no estimate while the phone is still', () => {
   const est = new MotionScaleEstimator();
   for (let t = 0; t < 3; t += 1 / 30) {

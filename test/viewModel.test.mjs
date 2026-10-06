@@ -60,6 +60,16 @@ test('rays from the eye pass through the physical screen corners', () => {
   assert.ok(p.d > 0);
 });
 
+test('a near plane at the screen distance puts the frustum edges exactly on the screen', () => {
+  // Window clipping: with near = eye-to-screen distance, the near plane is the glass itself.
+  const E = [0.03, -0.02, 0.35];
+  const s = screenInWorld(E, yaw(15), rotate({ x: 0, y: -Math.sin(Math.PI / 24), z: 0, w: Math.cos(Math.PI / 24) }, E), W, H);
+  const d = generalizedPerspective(s.pa, s.pb, s.pc, E, 0.01).d;
+  const p = generalizedPerspective(s.pa, s.pb, s.pc, E, d);
+  near(p.right - p.left, W, 1e-9); // the near-plane rectangle is the screen
+  near(p.top - p.bottom, H, 1e-9);
+});
+
 test('screen pose is recovered from the tracked front-camera pose', () => {
   // A screen yawed 30° with its center at P; the camera sits 8 cm above the center.
   const qS = yaw(30);
