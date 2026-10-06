@@ -12,7 +12,12 @@ import {
   IRIS_DIAMETER_M,
   approach,
 } from './windowMath.js';
-import { MotionScaleEstimator, fitEyeCorrection } from './calibration.js';
+import {
+  MotionScaleEstimator,
+  fitEyeCorrection,
+  rawDistanceElasticity,
+  angularSizeLimit,
+} from './calibration.js';
 import {
   rotate,
   screenInWorld,
@@ -49,6 +54,7 @@ const DEFAULTS = {
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
+  eyeDepthOffset: 0, // meters
 };
 
 const SLIDERS = [
@@ -160,7 +166,7 @@ class Jitter {
     return this.n ? `${(this.mean * 100).toFixed(1)}±${(Math.sqrt(this.vari) * 100).toFixed(1)}` : '–';
   }
 }
-const distStats = { eyes: new Jitter(), iris: new Jitter(), face: new Jitter() };
+const distStats = { eyes: new Jitter(), eyes2d: new Jitter(), iris: new Jitter(), face: new Jitter() };
 
 // ---------- automatic calibration (calibration.js) ----------
 
@@ -175,14 +181,26 @@ addEventListener('devicemotion', (e) => {
 const eyeRaw = neutralEye();
 const camInScreen = () => [0, screenM.h / 2 + settings.camOffsetMm / 1000, 0];
 
-// Apply the eye correction: lateral offsets and distance from the camera are rescaled.
+// Apply the eye correction: lateral offsets are rescaled, and distance from the camera
+// follows the fitted depth model true = b·raw + δ.
 function correctEye(raw) {
   const c = camInScreen();
   return {
     x: c[0] + (raw.x - c[0]) * settings.eyeLateral,
     y: c[1] + (raw.y - c[1]) * settings.eyeLateral,
-    z: c[2] + (raw.z - c[2]) * settings.eyeDepth,
+    z: c[2] + (raw.z - c[2]) * settings.eyeDepth + settings.eyeDepthOffset,
   };
+}
+
+// Largest rotation (radians) between the first sample and any other.
+function rotationSpread(samples) {
+  const q0 = samples[0].q;
+  let max = 0;
+  for (const { q } of samples) {
+    const d = Math.abs(q0.x * q.x + q0.y * q.y + q0.z * q.z + q0.w * q.w);
+    max = Math.max(max, 2 * Math.acos(Math.min(1, d)));
+  }
+  return max;
 }
 
 const eyeFit = { samples: [], lastT: 0, last: null };
@@ -200,12 +218,20 @@ function updateEyeCorrection(measured, t) {
 
   const spread = [0, 1, 2].map((i) => Math.max(...s.map((x) => x.p[i])) - Math.min(...s.map((x) => x.p[i])));
   if (Math.max(...spread) < 0.04) return; // phone hasn't moved enough
-  const fit = fitEyeCorrection(s);
+  // The depth offset is only separable from the eye's position when the phone also tilts.
+  const withOffset = rotationSpread(s) > (6 * Math.PI) / 180;
+  // Without enough tilt, keep the current offset fixed by folding it into the camera position.
+  const fitSamples = withOffset
+    ? s
+    : s.map((x) => ({ ...x, c: [x.c[0], x.c[1], x.c[2] + settings.eyeDepthOffset] }));
+  const fit = fitEyeCorrection(fitSamples, withOffset);
   eyeFit.last = fit;
   // Reject fits that don't explain the motion (e.g. the head moved too).
   if (!fit || fit.rms > 0.015 || fit.lateral < 0.6 || fit.lateral > 1.6 || fit.depth < 0.6 || fit.depth > 1.6) return;
+  if (Math.abs(fit.offset) > 0.15) return;
   settings.eyeLateral += (fit.lateral - settings.eyeLateral) * 0.2;
   settings.eyeDepth += (fit.depth - settings.eyeDepth) * 0.2;
+  if (withOffset) settings.eyeDepthOffset += (fit.offset - settings.eyeDepthOffset) * 0.2;
   saveSettings();
 }
 
@@ -268,6 +294,9 @@ function updateTracking(t, nowMs) {
     const byEyes = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h);
     const byIris = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h, iris);
     if (byEyes) distStats.eyes.add(byEyes.z);
+    // Diagnostic: eye spacing from the 2D landmark positions only (no MediaPipe depth term).
+    const by2d = eyeFromIris({ ...r.a, z: 0 }, { ...r.b, z: 0 }, r.videoW, r.videoH, cal, screenM.h);
+    if (by2d) distStats.eyes2d.add(by2d.z);
     if (byIris) distStats.iris.add(byIris.z);
     if (r.faceMatrix) distStats.face.add(Math.abs(matrixTranslation(r.faceMatrix)[2]) / 100);
 
@@ -411,6 +440,26 @@ function setStatus(text, kind = '') {
   statusEl.className = 'pill' + (kind ? ' ' + kind : '');
 }
 
+// Guideposts for the angular-size invariant: content D behind the screen must not shrink
+// in angular size as the viewer leans in, i.e. d ln ẑ / d ln z ≤ 1 + ẑ/D. Uses the fitted
+// depth model true = b·raw + δ to show how the RAW estimate behaves; the corrected
+// estimate tracks true distance (elasticity 1) once the model is right.
+function guidepostLines() {
+  const b = settings.eyeDepth;
+  const d = settings.eyeDepthOffset;
+  const sign = d >= 0 ? '+' : '−';
+  const lines = [`depth model true = ${b.toFixed(2)}×raw ${sign} ${Math.abs(d * 100).toFixed(1)} cm`];
+  const D = 1; // reference content 1 m behind the screen
+  for (const z of [0.2, 0.4]) {
+    const raw = (z - d) / b;
+    const e = rawDistanceElasticity(z, d);
+    const lim = angularSizeLimit(raw, D);
+    const ok = e <= lim ? 'OK' : 'VIOLATES';
+    lines.push(`guidepost @${z * 100}cm  raw elasticity ${e.toFixed(2)}  limit ${lim.toFixed(2)} (D=1m)  ${ok}`);
+  }
+  return lines;
+}
+
 const euler = new THREE.Euler();
 function renderDebug() {
   const cm = (v) => (v * 100).toFixed(1).padStart(6);
@@ -426,7 +475,7 @@ function renderDebug() {
   ];
   if (mode === 'camera') {
     const d = distStats;
-    lines.push(`dist cm  eyes ${d.eyes.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
+    lines.push(`dist cm  eyes ${d.eyes.text()}  2D ${d.eyes2d.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
     if (phoneTracker && view.source === 'AlvaAR') {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
@@ -442,8 +491,11 @@ function renderDebug() {
       const k = motionScale.scale;
       lines.push(`motion scale ${k === null ? 'calibrating' : k.toFixed(3) + ' m/unit'}  (${motionScale.pairs} samples)`);
       const f = eyeFit.last;
-      const fitText = f ? `last fit ${f.lateral.toFixed(2)}/${f.depth.toFixed(2)} rms ${(f.rms * 100).toFixed(1)} cm` : 'no fit yet';
+      const fitText = f
+        ? `last fit ${f.lateral.toFixed(2)}/${f.depth.toFixed(2)}/${(f.offset * 100).toFixed(1)}cm rms ${(f.rms * 100).toFixed(1)} cm`
+        : 'no fit yet';
       lines.push(`eye corr    lateral ${settings.eyeLateral.toFixed(2)} depth ${settings.eyeDepth.toFixed(2)}  ${fitText}`);
+      lines.push(...guidepostLines());
     }
   }
   debugEl.textContent = lines.join('\n');

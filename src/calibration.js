@@ -116,26 +116,31 @@ function solve(A, b) {
 //   p : screen center in the world (meters)       q : screen rotation
 //   u : face-tracked eye position relative to the front camera, in the screen frame
 //   c : front camera position in the screen frame (meters)
-// Model: true eye in screen = c + [a·u.x, a·u.y, b·u.z], and the eye's world position
+// Model: true eye in screen = c + [a·u.x, a·u.y, b·u.z + δ], and the eye's world position
 // p + q·(that) is the same fixed point E for every sample.
-// Returns { lateral: a, depth: b, eye: E, rms } or null if the motion doesn't constrain it.
-export function fitEyeCorrection(samples) {
+// The depth offset δ is only separable from E when the phone also rotates (rotation turns
+// the offset's direction while E stays put); without enough rotation pass withOffset=false.
+// Returns { lateral: a, depth: b, offset: δ, eye: E, rms } or null if unconstrained.
+export function fitEyeCorrection(samples, withOffset = true) {
   if (samples.length < 10) return null;
-  const AtA = Array.from({ length: 5 }, () => new Array(5).fill(0));
-  const Atb = new Array(5).fill(0);
+  const n = withOffset ? 6 : 5;
+  const AtA = Array.from({ length: n }, () => new Array(n).fill(0));
+  const Atb = new Array(n).fill(0);
   const rows = [];
   for (const s of samples) {
     const lat = rotate(s.q, [s.u[0], s.u[1], 0]);
     const dep = rotate(s.q, [0, 0, s.u[2]]);
+    const nrm = rotate(s.q, [0, 0, 1]);
     const base = rotate(s.q, s.c);
     for (let i = 0; i < 3; i++) {
-      // a·lat_i + b·dep_i − E_i = −(p_i + base_i)
-      const row = [lat[i], dep[i], i === 0 ? -1 : 0, i === 1 ? -1 : 0, i === 2 ? -1 : 0];
+      // a·lat_i + b·dep_i (+ δ·nrm_i) − E_i = −(p_i + base_i)
+      const e = [i === 0 ? -1 : 0, i === 1 ? -1 : 0, i === 2 ? -1 : 0];
+      const row = withOffset ? [lat[i], dep[i], nrm[i], ...e] : [lat[i], dep[i], ...e];
       const rhs = -(s.p[i] + base[i]);
       rows.push([row, rhs]);
-      for (let r = 0; r < 5; r++) {
+      for (let r = 0; r < n; r++) {
         Atb[r] += row[r] * rhs;
-        for (let k = 0; k < 5; k++) AtA[r][k] += row[r] * row[k];
+        for (let k = 0; k < n; k++) AtA[r][k] += row[r] * row[k];
       }
     }
   }
@@ -146,5 +151,25 @@ export function fitEyeCorrection(samples) {
     const e = row.reduce((acc, v, k) => acc + v * x[k], 0) - rhs;
     sq += e * e;
   }
-  return { lateral: x[0], depth: x[1], eye: [x[2], x[3], x[4]], rms: Math.sqrt(sq / rows.length) };
+  const [a, b, ...rest] = x;
+  const offset = withOffset ? rest[0] : 0;
+  const eye = withOffset ? rest.slice(1) : rest;
+  return { lateral: a, depth: b, offset, eye, rms: Math.sqrt(sq / rows.length) };
+}
+
+// ---------- guideposts ----------
+// Through a real window, content at depth D behind it must not shrink in angular size as
+// the viewer leans in. With the true distance z and the distance the renderer uses ẑ(z),
+// that holds iff  d ln ẑ / d ln z ≤ 1 + ẑ/D  (→ 1 for distant content).
+
+// Elasticity d ln ẑ / d ln z of the raw estimate, given the fitted depth model
+// z = b·ẑ + δ (distances measured from the camera). The scale b cancels out: only an
+// offset (or other nonlinearity) can break the invariant.
+export function rawDistanceElasticity(z, depthOffset) {
+  return z / (z - depthOffset);
+}
+
+// The invariant's limit for content at depth D, using the distance the renderer uses.
+export function angularSizeLimit(zHat, D) {
+  return 1 + zHat / D;
 }
