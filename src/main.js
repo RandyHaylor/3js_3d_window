@@ -372,7 +372,7 @@ function updateTracking(t, nowMs) {
   // A new video frame arrived (r is null when it has no face).
   if (r !== undefined && phoneTracker) {
     const pt = phoneTracker;
-    pt.update(r ? r.box : null);
+    pt.update();
     if (pt.resets !== seenResets) {
       seenResets = pt.resets; // new map: new origin and new scale
       resetCalibration();
