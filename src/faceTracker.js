@@ -11,23 +11,20 @@ const MODEL_URL =
 const IRIS_A = 468;
 const IRIS_B = 473;
 
-// Front-camera formats to choose from. Requested in landscape terms; Safari picks the
-// matching sensor preset and rotates it to the phone's orientation. Formats differ in how
-// much of the sensor they use, i.e. in field of view.
-export const CAMERA_FORMATS = {
-  '640x480': [640, 480],
-  '1280x960': [1280, 960],
-  '1920x1440': [1920, 1440],
-  '1920x1080': [1920, 1080],
-};
-
-// Starts the front camera. Call synchronously from a user gesture handler.
-export function openFrontCamera(video, format = '640x480') {
-  const [width, height] = CAMERA_FORMATS[format] ?? CAMERA_FORMATS['640x480'];
+// Starts the front camera with the widest view available: the sensor's native 4:3 shape at
+// the largest size, so Safari picks the format that reads the whole sensor (iOS has no zoom
+// control for web pages). Requested in landscape terms; Safari rotates it to the phone's
+// orientation. Call synchronously from a user gesture handler.
+export function openFrontCamera(video) {
   return navigator.mediaDevices
     .getUserMedia({
       audio: false,
-      video: { facingMode: 'user', width: { ideal: width }, height: { ideal: height } },
+      video: {
+        facingMode: 'user',
+        width: { ideal: 4032 },
+        height: { ideal: 3024 },
+        aspectRatio: { ideal: 4 / 3 },
+      },
     })
     .then(async (stream) => {
       video.srcObject = stream;
