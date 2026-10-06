@@ -80,6 +80,22 @@ export function screenInWorld(eyeW, q, eyeS, w, h) {
   return { center, pa: at(-w / 2, -h / 2), pb: at(w / 2, -h / 2), pc: at(-w / 2, h / 2) };
 }
 
+// Window camera: the virtual camera sits at the window (screen center), looks along the
+// vector from the eye to the screen, and its field of view is the angle the screen
+// covers as seen from the eye. Returns { position, dir, up, fovDeg, aspect }.
+export function windowCamera(eyeW, screen, w, h) {
+  const toScreen = sub(screen.center, eyeW);
+  const dist = Math.hypot(toScreen[0], toScreen[1], toScreen[2]);
+  return {
+    position: screen.center,
+    dir: toScreen.map((v) => v / dist),
+    up: normalize(sub(screen.pc, screen.pa)),
+    fovDeg: (2 * Math.atan(h / 2 / dist) * 180) / Math.PI,
+    aspect: w / h,
+    dist,
+  };
+}
+
 // Generalized perspective projection from eye pe through the screen corners.
 // Returns frustum extents at the near plane and the screen basis (vr right, vu up,
 // vn normal toward the eye). The camera sits at pe with orientation (vr, vu, vn).

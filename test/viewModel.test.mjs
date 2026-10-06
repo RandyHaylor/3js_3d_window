@@ -10,6 +10,7 @@ import {
   screenPoseFromCamera,
   relativePose,
   screenFromPose,
+  windowCamera,
 } from '../src/viewModel.js';
 
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
@@ -68,6 +69,20 @@ test('a near plane at the screen distance puts the frustum edges exactly on the 
   const p = generalizedPerspective(s.pa, s.pb, s.pc, E, d);
   near(p.right - p.left, W, 1e-9); // the near-plane rectangle is the screen
   near(p.top - p.bottom, H, 1e-9);
+});
+
+test('window camera: at the screen, looking from the eye through it, FOV from eye distance', () => {
+  const s = screenFromPose([0, 0, 0], IDENTITY, W, H);
+  const cam = windowCamera([0, 0, 0.4], s, W, H);
+  nearV(cam.position, [0, 0, 0]);
+  nearV(cam.dir, [0, 0, -1]); // eye → screen points into the virtual space
+  nearV(cam.up, [0, 1, 0]);
+  near(cam.fovDeg, (2 * Math.atan(H / 2 / 0.4) * 180) / Math.PI);
+  // Eye moved left: the camera turns to look right, through the window.
+  const left = windowCamera([-0.1, 0, 0.4], s, W, H);
+  assert.ok(left.dir[0] > 0);
+  // Eye closer: wider field of view.
+  assert.ok(windowCamera([0, 0, 0.2], s, W, H).fovDeg > cam.fovDeg);
 });
 
 test('screen pose is recovered from the tracked front-camera pose', () => {

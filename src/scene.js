@@ -4,9 +4,12 @@ import * as THREE from 'three';
 // z=0 plane; most of the room lies behind it (-z) but it also wraps around the
 // viewer so rotating the phone reveals the side walls.
 const ROOM = { x0: -0.4, x1: 0.4, y0: -0.4, y1: 0.28, z0: -1.0, z1: 0.6 };
-// The room and everything in it is built at the sizes below and then scaled up so the
-// back wall sits 6 ft (1.83 m) behind the screen. 1 virtual meter = 1 real meter after this.
-const SCENE_SCALE = 1.83;
+// The room and everything in it is built at the sizes below and then scaled so the back
+// wall sits 48 in (1.219 m) behind the screen. 1 virtual meter = 1 real meter after this.
+const INCH = 0.0254;
+const SCENE_SCALE = (48 * INCH) / -ROOM.z0;
+// Foreground object: 6 in behind the window (in the unscaled build units below).
+const FOREGROUND_Z = -(6 * INCH) / SCENE_SCALE;
 // Height the objects are arranged on. Kept above the floor so the floor sits well
 // below the screen's lower edge while the objects stay in view.
 const BASE_Y = -0.16;
@@ -104,9 +107,9 @@ function buildObjects() {
 
   // Foreground: a torus knot just behind the glass, on a slim stand.
   const fgStandH = 0.13;
-  g.add(pedestal(0.012, -0.07, fgStandH, 0.006, 0x8890b0));
+  g.add(pedestal(0.012, FOREGROUND_Z, fgStandH, 0.006, 0x8890b0));
   const knot = shadowed(new THREE.Mesh(new THREE.TorusKnotGeometry(0.018, 0.0055, 160, 24), std(0xffc94a, { metalness: 0.4 })));
-  knot.position.set(0.012, floorY + fgStandH + 0.024, -0.07);
+  knot.position.set(0.012, floorY + fgStandH + 0.024, FOREGROUND_Z);
   knot.rotation.set(0.4, 0.6, 0);
   g.add(knot);
 

@@ -25,6 +25,7 @@ import {
   screenPoseFromCamera,
   relativePose,
   screenFromPose,
+  windowCamera,
 } from './viewModel.js';
 import { Vec3Filter } from './filters.js';
 import { FaceTracker, openFrontCamera } from './faceTracker.js';
@@ -53,6 +54,7 @@ const DEFAULTS = {
   showPreview: false,
   phoneTracking: true,
   showStats: false, // stats drawer (top-left ▾)
+  eyeCamera: false, // false: camera at the window (default); true: camera at the eye, off-axis frustum
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
@@ -84,6 +86,7 @@ const TOGGLES = [
   { key: 'showPreview', label: 'Show camera preview' },
   { key: 'phoneTracking', label: 'Phone tracking (AlvaAR room tracking)' },
   { key: 'autoEyeCal', label: 'Automatic eye correction (experimental; assumes a still head)' },
+  { key: 'eyeCamera', label: 'Camera at the eye (off-axis) instead of at the window' },
 ];
 
 // v2: new defaults (iris scale, no automatic eye correction); v1 values are not carried over.
@@ -404,19 +407,34 @@ function updateCamera(t) {
 
   const d = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR).d; // eye → screen plane
   if (!(d > 0.02)) return false; // eye at or behind the screen plane
+  view.phoneW = s.center;
+  view.d = d;
+
+  if (!settings.eyeCamera) {
+    // Window camera (default): the camera sits at the window, looks along the eye → phone
+    // vector, and its field of view is the angle the screen covers from the eye.
+    const wc = windowCamera(eyeAnchor, s, screenM.w, screenM.h);
+    camera.position.fromArray(wc.position);
+    camera.up.fromArray(wc.up);
+    camera.lookAt(wc.position[0] + wc.dir[0], wc.position[1] + wc.dir[1], wc.position[2] + wc.dir[2]);
+    camera.fov = wc.fovDeg;
+    camera.aspect = wc.aspect;
+    camera.near = 0.01;
+    camera.far = FAR;
+    camera.updateProjectionMatrix();
+    return true;
+  }
+
+  // Eye camera: at the eye, image plane = the screen (off-axis frustum through its corners).
   // A window only shows what is behind it: the near clipping plane IS the screen plane,
   // so anything between the viewer and the glass is clipped (cut at the frame).
   const near = d * 0.999;
   const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, near);
-
   camera.projectionMatrix.makePerspective(p.left, p.right, p.top, p.bottom, near, FAR);
   camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
   basis.makeBasis(vr.fromArray(p.vr), vu.fromArray(p.vu), vn.fromArray(p.vn));
   camera.quaternion.setFromRotationMatrix(basis);
   camera.position.fromArray(eyeAnchor);
-
-  view.phoneW = s.center;
-  view.d = p.d;
   return true;
 }
 
