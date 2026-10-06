@@ -50,6 +50,7 @@ const DEFAULTS = {
   worldScale: 1,
   smoothing: 4,
   rotationSmoothing: 4, // Hz, camera rotation (eye → phone direction)
+  eyeWorldSmoothing: 1, // Hz, the eye's position in 3D space (plain low-pass)
   flipX: false,
   useIris: true, // iris diameter (11.7 mm) is the physical reference for eye scale
   autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
@@ -88,6 +89,15 @@ const SLIDERS = [
     hint: 'The front camera sits half the display height above its center; this fine-tunes that.',
   },
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 30, step: 0.1, hint: 'Lower = steadier, higher = snappier.' },
+  {
+    key: 'eyeWorldSmoothing',
+    label: 'Eye position smoothing (in 3D space)',
+    unit: 'Hz',
+    min: 0.1,
+    max: 30,
+    step: 0.1,
+    hint: "Smooths where the eyes are in the room, not relative to the phone. Lower = steadier.",
+  },
   {
     key: 'rotationSmoothing',
     label: 'Camera rotation smoothing',
@@ -226,9 +236,9 @@ const phoneQ = new THREE.Quaternion();
 const view = { phoneW: [0, 0, 0], d: 0, source: '' }; // for the debug readout
 
 const filter = new Vec3Filter();
-// Smooths the eye's WORLD position (eyeAnchor). Smoothing after the phone rotation is
-// applied keeps a still head still while the phone turns. World z is roughly the viewing
-// depth (the viewer faces the phone at Recenter), so it gets the depth settings.
+// Smooths the eye's WORLD position (eyeAnchor), setting eyeWorldSmoothing. A plain
+// low-pass (no speed boost): a still head's position in the room is constant, so any
+// wobble from the phone turning is filtered out instead of passed through as motion.
 const worldEyeFilter = new Vec3Filter();
 // Drops single bad eye measurements (in the world) before they reach eyeAnchor.
 const eyeGate = new OutlierGate();
@@ -238,7 +248,7 @@ function applySmoothing() {
   const xy = { minCutoff: settings.smoothing, beta: 8 };
   const z = { minCutoff: settings.smoothing * 0.6, beta: 4 };
   filter.setParams(xy, z);
-  worldEyeFilter.setParams(xy, z);
+  worldEyeFilter.setParams({ minCutoff: settings.eyeWorldSmoothing, beta: 0 });
   dirFilter.setParams({ minCutoff: settings.rotationSmoothing, beta: 2 });
 }
 applySmoothing();
@@ -273,7 +283,13 @@ let cameraDelayT = 0;
 // ---------- debug log (Send log in the stats drawer) ----------
 // The last LOG_SECONDS of raw inputs, so problems on the device can be analyzed exactly.
 const LOG_SECONDS = 20;
-const debugLog = { imu: [], frames: [] };
+const debugLog = { imu: [], frames: [], sync: [] };
+const r4 = (v) => +v.toFixed(4);
+// One entry per camera frame from syncedUpdate: what it decided and with which inputs.
+function logSync(tc, why, extra = {}) {
+  debugLog.sync.push({ t: r4(tc), why, src: frames.timeSource, delay: cameraDelay.delay, ...extra });
+  trimLog(debugLog.sync, tc);
+}
 function trimLog(list, t) {
   while (list.length && list[0].t < t - LOG_SECONDS) list.shift();
 }
@@ -580,6 +596,7 @@ function syncedUpdate(tc, e) {
   const hold = (key, why) => {
     sync[key]++;
     view.source = `holding: ${why}`;
+    logSync(tc, key);
   };
   if (!e) return hold('noFace', 'no face');
   const sensors = settings.useOrientation && orient.hasData;
@@ -617,6 +634,14 @@ function syncedUpdate(tc, e) {
   const w = worldEyeFilter.filter(eyeW, tc);
   eyeAnchor = [w.x, w.y, w.z];
   lastCompleteT = tc;
+  const qa = phoneRotationAt(tc);
+  logSync(tc, 'ok', {
+    q: [qa.x, qa.y, qa.z, qa.w].map(r4),
+    eyeS: [m.x, m.y, m.z].map(r4), // measured, phone frame
+    eyeW: wp.map(r4), // placed in the room
+    anchor: eyeAnchor.map(r4), // smoothed in the room
+    pos: phonePos.map(r4),
+  });
   view.source = !sensors ? 'synced (no motion sensors: phone fixed)' : measured ? 'synced' : 'synced (phone tracking off)';
 }
 
@@ -768,6 +793,7 @@ $('sendLog').addEventListener('click', async () => {
     settings,
     frames: debugLog.frames,
     imu: debugLog.imu,
+    sync: debugLog.sync,
   };
   btn.textContent = 'Sending…';
   try {
@@ -1014,7 +1040,7 @@ function measureCameraFov() {
 }
 
 function onSettingChanged(key) {
-  if (key === 'smoothing' || key === 'rotationSmoothing') applySmoothing();
+  if (key === 'smoothing' || key === 'rotationSmoothing' || key === 'eyeWorldSmoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
   if (key === 'phoneTracking') settings.phoneTracking ? startPhoneTracker() : stopPhoneTracker();
