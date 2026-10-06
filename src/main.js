@@ -55,6 +55,7 @@ const DEFAULTS = {
   eyeLateral: 1,
   eyeDepth: 1,
   eyeDepthOffset: 0, // meters
+  eyeOffsetManual: false, // set when the user adjusts the offset; stops the auto fit changing it
 };
 
 const SLIDERS = [
@@ -65,7 +66,18 @@ const SLIDERS = [
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
 ];
 // Quick-access sliders in the top-corner Adjust drawer.
-const ADJUST = [{ key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 }];
+const ADJUST = [
+  { key: 'worldScale', label: 'Scale', unit: '×', min: 0.1, max: 2, step: 0.01 },
+  {
+    key: 'eyeDepthOffset',
+    label: 'Distance offset',
+    unit: 'm',
+    min: -0.1,
+    max: 0.3,
+    step: 0.005,
+    hint: 'Added to the measured eye distance. Raise it if leaning in changes the view too much.',
+  },
+];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
   { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
@@ -219,7 +231,7 @@ function updateEyeCorrection(measured, t) {
   const spread = [0, 1, 2].map((i) => Math.max(...s.map((x) => x.p[i])) - Math.min(...s.map((x) => x.p[i])));
   if (Math.max(...spread) < 0.04) return; // phone hasn't moved enough
   // The depth offset is only separable from the eye's position when the phone also tilts.
-  const withOffset = rotationSpread(s) > (6 * Math.PI) / 180;
+  const withOffset = !settings.eyeOffsetManual && rotationSpread(s) > (6 * Math.PI) / 180;
   // Without enough tilt, keep the current offset fixed by folding it into the camera position.
   const fitSamples = withOffset
     ? s
@@ -598,6 +610,7 @@ function buildSliders(body, list) {
       settings[s.key] = parseFloat(input.value);
       out.textContent = `${fmt(settings[s.key], s.step)} ${s.unit}`;
       onSettingChanged(s.key);
+      if (s.key === 'eyeDepthOffset') onOffsetSlider();
     });
     body.appendChild(row);
   }
@@ -653,6 +666,12 @@ function onSettingChanged(key) {
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
   if (key === 'phoneTracking') settings.phoneTracking ? startPhoneTracker() : stopPhoneTracker();
+  saveSettings();
+}
+
+// The user moved the offset slider: their value wins over the automatic fit.
+function onOffsetSlider() {
+  settings.eyeOffsetManual = true;
   saveSettings();
 }
 
