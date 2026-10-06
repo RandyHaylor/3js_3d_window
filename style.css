@@ -143,6 +143,14 @@ button:active { transform: scale(0.97); }
   transition: transform 0.15s;
 }
 #debugToggle[aria-expanded="true"] { transform: rotate(180deg); }
+#sendLog {
+  position: absolute;
+  left: calc(52px + env(safe-area-inset-left));
+  top: calc(10px + env(safe-area-inset-top));
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--panel);
+}
 
 #debug {
   position: absolute;

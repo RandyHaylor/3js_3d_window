@@ -14,6 +14,7 @@ import {
 } from './windowMath.js';
 import {
   MotionScaleEstimator,
+  MIN_SCALE_PAIRS,
   fitEyeCorrection,
   rawDistanceElasticity,
   angularSizeLimit,
@@ -200,6 +201,18 @@ const distStats = { eyes: new Jitter(), eyes2d: new Jitter(), iris: new Jitter()
 
 // Meters per AlvaAR unit, from AlvaAR's motion vs. the accelerometer.
 const motionScale = new MotionScaleEstimator();
+// ---------- debug log (Send log in the stats drawer) ----------
+// The last LOG_SECONDS of raw inputs, so problems on the device can be analyzed exactly.
+const LOG_SECONDS = 20;
+const debugLog = { imu: [], frames: [] };
+function trimLog(list, t) {
+  while (list.length && list[0].t < t - LOG_SECONDS) list.shift();
+}
+function logImu(t, a) {
+  debugLog.imu.push({ t: +t.toFixed(4), a: a.map((v) => +v.toFixed(4)) });
+  trimLog(debugLog.imu, t);
+}
+
 // The phone counts as moving only while the accelerometer says so. The camera position
 // (the phone position) may only change then.
 const phoneMotion = { acc: 0, lastMovingT: -Infinity, hasData: false };
@@ -212,6 +225,7 @@ addEventListener('devicemotion', (e) => {
   const t = performance.now() / 1000;
   phoneMotion.hasData = true;
   motionScale.addImu([a.x, a.y, a.z], t);
+  logImu(t, [a.x, a.y, a.z]);
   phoneMotion.acc += (Math.hypot(a.x, a.y, a.z) - phoneMotion.acc) * 0.3;
   if (phoneMotion.acc > MOVING_ACCEL) phoneMotion.lastMovingT = t;
 });
@@ -341,6 +355,23 @@ function updateTracking(t, nowMs) {
     }
     if (pt.status === 'tracking' && pt.position) motionScale.addPosition(pt.position, performance.now() / 1000);
   }
+  if (fresh) {
+    const pt = phoneTracker;
+    debugLog.frames.push({
+      t: +t.toFixed(4),
+      eyes: r ? 1 : 0,
+      eye: r ? [eyeRaw.x, eyeRaw.y, eyeRaw.z].map((v) => +v.toFixed(4)) : null,
+      alva: pt ? pt.status : null,
+      alvaPos: pt && pt.position ? pt.position.map((v) => +v.toFixed(4)) : null,
+      pts: pt ? pt.points : 0,
+      alvaMs: pt ? +pt.ms.toFixed(1) : 0,
+      pairs: motionScale.pairs,
+      scale: motionScale.scale,
+      moving: phoneIsMoving() ? 1 : 0,
+      phonePos: phonePos.map((v) => +v.toFixed(4)),
+    });
+    trimLog(debugLog.frames, t);
+  }
   if (r) {
     const cal = calibration();
     const iris = { px: irisDiameterPx(r.irises, r.videoW, r.videoH), m: IRIS_DIAMETER_M };
@@ -368,12 +399,24 @@ function updateTracking(t, nowMs) {
   }
   if (t - track.lastSeen > LOST_AFTER) track.lost = true;
 
+  // One status line per part, so nothing hides anything else:
+  //   Eyes  = face tracking sees the eyes
+  //   Room  = AlvaAR has locked onto the room
+  //   Scale = AlvaAR units → meters, learned from moving the phone (n of required samples)
   const pt = phoneTracker;
-  if (!tracker) setStatus('Loading face model…');
-  else if (track.lost) setStatus('No eyes detected', 'warn');
-  else if (pt && pt.status !== 'tracking') setStatus('Finding the room: move the phone slowly');
-  else if (pt && motionScale.scale === null) setStatus('Calibrating: move the phone around gently');
-  else setStatus('Tracking', 'ok');
+  if (!tracker) {
+    setStatus('Loading face model…');
+  } else {
+    const eyes = track.lost ? 'Eyes ✗' : 'Eyes ✓';
+    const room = !pt ? '' : pt.status === 'tracking' ? ' · Room ✓' : ' · Room …';
+    const scale = !pt
+      ? ''
+      : motionScale.scale !== null
+        ? ' · Scale ✓'
+        : ` · Scale ${Math.min(motionScale.pairs, MIN_SCALE_PAIRS)}/${MIN_SCALE_PAIRS}`;
+    const ready = !track.lost && (!pt || (pt.status === 'tracking' && motionScale.scale !== null));
+    setStatus(eyes + room + scale, ready ? 'ok' : track.lost ? 'warn' : '');
+  }
 }
 
 // Phone pose measured by AlvaAR (front camera), as a Three.js-style camera pose using
@@ -527,6 +570,7 @@ const debugToggle = $('debugToggle');
 function setStatsOpen(open) {
   settings.showStats = open;
   debugEl.hidden = !open;
+  $('sendLog').hidden = !open;
   debugToggle.setAttribute('aria-expanded', String(open));
   debugToggle.setAttribute('aria-label', open ? 'Hide stats' : 'Show stats');
 }
@@ -536,6 +580,37 @@ debugToggle.addEventListener('click', () => {
   saveSettings();
 });
 setStatsOpen(settings.showStats);
+
+// Send the last LOG_SECONDS of raw inputs to the dev server (POST ./log; only the local /
+// tunnel server accepts it, GitHub Pages does not).
+$('sendLog').addEventListener('click', async () => {
+  const btn = $('sendLog');
+  const body = {
+    sentAt: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    screen: [screen.width, screen.height, devicePixelRatio],
+    page: [innerWidth, innerHeight],
+    displayM,
+    pageM: screenM,
+    camera: [video.videoWidth, video.videoHeight],
+    processed: [frames.width, frames.height],
+    camFps: camRate.fps,
+    orientState,
+    motionData: phoneMotion.hasData,
+    calibration: { pairs: motionScale.pairs, scale: motionScale.scale, diag: motionScale.diag, lastWindow: motionScale.lastWindow },
+    settings,
+    frames: debugLog.frames,
+    imu: debugLog.imu,
+  };
+  btn.textContent = 'Sending…';
+  try {
+    const res = await fetch('./log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    btn.textContent = res.ok ? 'Log sent ✓' : `Send failed (${res.status})`;
+  } catch (err) {
+    btn.textContent = 'Send failed';
+  }
+  setTimeout(() => (btn.textContent = 'Send log'), 3000);
+});
 
 const euler = new THREE.Euler();
 function renderDebug() {

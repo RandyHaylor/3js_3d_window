@@ -21,6 +21,7 @@ const MIN_DV = 0.05; // m/s, only compare windows with clear motion
 const MAX_GAP = 0.6; // s between tracker frames; longer is a dropout
 const SPAN = 0.15; // s, minimum spacing of the three frames compared (tracker jitter matters less)
 const MIN_PAIRS = 20;
+export const MIN_SCALE_PAIRS = MIN_PAIRS;
 
 // Estimates meters per tracker unit from tracker positions and accelerometer readings.
 export class MotionScaleEstimator {
@@ -34,16 +35,21 @@ export class MotionScaleEstimator {
     this.sumIV = 0;
     this.sumVV = 0;
     this.pairs = 0;
+    // Diagnostics: how many accelerometer samples / comparison windows were seen, and why
+    // windows were rejected.
+    this.diag = { imuSamples: 0, positions: 0, windows: 0, noImuCoverage: 0, tooLittleMotion: 0 };
   }
 
   // Accelerometer reading without gravity (m/s², any frame), time in seconds.
   addImu(acc, t) {
+    this.diag.imuSamples++;
     this.imu.push({ t, a: acc });
     while (this.imu.length && this.imu[0].t < t - 3) this.imu.shift();
   }
 
   // Tracker position (tracker units), time in seconds.
   addPosition(p, t) {
+    this.diag.positions++;
     const f = this.frames;
     if (f.length && (t - f[f.length - 1].t > MAX_GAP || t <= f[f.length - 1].t)) f.length = 0;
     f.push({ t, p });
@@ -67,11 +73,19 @@ export class MotionScaleEstimator {
     const h1 = f1.t - f0.t;
     const h2 = f2.t - f1.t;
     const dvVis = [0, 1, 2].map((i) => (f2.p[i] - f1.p[i]) / h2 - (f1.p[i] - f0.p[i]) / h1);
+    this.diag.windows++;
     const dvImu = this.integrate(f0.t, f1.t, f2.t);
-    if (!dvImu) return;
+    if (!dvImu) {
+      this.diag.noImuCoverage++;
+      return;
+    }
     const imu = Math.hypot(...dvImu);
-    if (imu < MIN_DV) return;
     const vis = Math.hypot(...dvVis);
+    this.lastWindow = { t: f2.t, dvImu: imu, dvVis: vis };
+    if (imu < MIN_DV) {
+      this.diag.tooLittleMotion++;
+      return;
+    }
     this.sumIV += imu * vis;
     this.sumVV += vis * vis;
     this.pairs++;
