@@ -1,43 +1,59 @@
 // Pure math for the "screen as a window" effect. No Three.js imports so it can
 // be unit-tested under node.
 
-// Physical screen size in meters from CSS pixel size and CSS px per inch.
-export function screenSizeMeters(cssW, cssH, cssPxPerInch) {
-  const m = 0.0254 / cssPxPerInch;
-  return { w: cssW * m, h: cssH * m };
-}
+const INCH = 0.0254;
 
-// Browsers don't expose physical screen size, so iPhones are identified by their
-// portrait CSS size and pixel ratio. Values are PPI / scale, from ios-resolution.com.
-// 375×812@3 is shared by the X/XS/11 Pro (458 ppi) and the 12/13 mini (476 ppi);
-// the more common 458 is used.
-const IPHONE_CSS_PPI = {
-  '375x667@2': 163, // SE 2nd/3rd gen
-  '414x896@2': 163, // XR, 11
-  '375x812@3': 458 / 3,
-  '414x896@3': 458 / 3, // XS Max, 11 Pro Max
-  '428x926@3': 458 / 3, // 12/13 Pro Max, 14 Plus
-  '390x844@3': 460 / 3, // 12, 13, 14, 17e
-  '393x852@3': 460 / 3, // 14 Pro, 15, 15 Pro, 16
-  '402x874@3': 460 / 3, // 16 Pro, 17, 17 Pro
-  '420x912@3': 460 / 3, // Air
-  '430x932@3': 460 / 3, // 14 Pro Max, 15 Plus/Pro Max, 16 Plus
-  '440x956@3': 460 / 3, // 16/17 Pro Max
+// Physical display size (portrait width × height, mm) of known iPhones, from Apple's specs
+// (native pixels / PPI). Browsers don't expose physical size, so the model is identified by
+// its CSS screen size and pixel ratio. 375×812@3 is shared by the X/XS/11 Pro and the
+// 12/13 mini (5.4"); the X/XS/11 Pro size is used.
+const IPHONE_DISPLAY_MM = {
+  '375x667@2': [58.4, 103.9], // SE 2nd/3rd gen
+  '414x896@2': [64.5, 139.6], // XR, 11
+  '375x812@3': [62.4, 135.1], // X, XS, 11 Pro
+  '414x896@3': [68.9, 149.1], // XS Max, 11 Pro Max
+  '428x926@3': [71.2, 154.1], // 12/13 Pro Max, 14 Plus
+  '390x844@3': [64.6, 139.8], // 12, 13, 14, 12/13 Pro
+  '393x852@3': [65.1, 141.1], // 14 Pro, 15, 15 Pro, 16
+  '402x874@3': [66.6, 144.8], // 16 Pro, 17, 17 Pro
+  '420x912@3': [69.6, 151.1], // Air
+  '430x932@3': [71.2, 154.4], // 14 Pro Max, 15 Plus/Pro Max, 16 Plus
+  '440x956@3': [72.9, 158.4], // 16/17 Pro Max
 };
+
+// Display height to assume when the device's real size isn't known.
+export const FALLBACK_DISPLAY_HEIGHT_M = { mobile: 2.5 * INCH, desktop: 8 * INCH };
 
 // Key identifying the device by its portrait CSS screen size and pixel ratio.
 export function screenModelKey(screenW, screenH, dpr) {
   return `${Math.min(screenW, screenH)}x${Math.max(screenW, screenH)}@${Math.round(dpr)}`;
 }
 
-// CSS px per inch for a known iPhone, or null.
-export function knownCssPpi(screenW, screenH, dpr) {
-  return IPHONE_CSS_PPI[screenModelKey(screenW, screenH, dpr)] ?? null;
+// Physical display size in meters, portrait-oriented like the screen values passed in.
+// Known iPhones come from the table; otherwise the fallback height is used, and the width
+// follows the screen's aspect ratio. Returns { w, h, known }.
+export function displaySizeM(screenW, screenH, dpr, isMobile) {
+  const mm = IPHONE_DISPLAY_MM[screenModelKey(screenW, screenH, dpr)];
+  const portrait = screenH >= screenW;
+  if (mm) {
+    const [pw, ph] = mm; // portrait width, height
+    return portrait
+      ? { w: pw / 1000, h: ph / 1000, known: true }
+      : { w: ph / 1000, h: pw / 1000, known: true };
+  }
+  const h = isMobile ? FALLBACK_DISPLAY_HEIGHT_M.mobile : FALLBACK_DISPLAY_HEIGHT_M.desktop;
+  return { w: h * (screenW / screenH), h, known: false };
+}
+
+// Size of the visible page (the window we render into) in meters: the fraction of the
+// display it covers, times the display's physical size. Only ratios of screen values are used.
+export function pageSizeM(display, pageW, pageH, screenW, screenH) {
+  return { w: display.w * (pageW / screenW), h: display.h * (pageH / screenH) };
 }
 
 // Front-camera field of view (degrees, long side of the video Safari delivers), measured
 // once per model with Settings → "Measure camera FOV" at a known distance. Keyed like
-// IPHONE_CSS_PPI. The automatic calibration refines this per session.
+// IPHONE_DISPLAY_MM. The automatic calibration refines this per session.
 const FRONT_CAMERA_FOV = {
   // '390x844@3': 0, // add measured values here
 };

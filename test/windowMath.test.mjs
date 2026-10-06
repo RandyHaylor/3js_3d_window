@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  screenSizeMeters,
+  displaySizeM,
+  pageSizeM,
   eyeFromIris,
-  knownCssPpi,
   fovForMeasuredDistance,
   irisDiameterPx,
   matrixTranslation,
@@ -13,10 +13,28 @@ import {
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
 const CAL = { ipdM: 0.064, fovLongDeg: 90, camOffsetM: 0, flipX: false };
 
-test('screen size converts CSS px to meters', () => {
-  const s = screenSizeMeters(96, 192, 96); // 1 inch × 2 inches
-  near(s.w, 0.0254);
-  near(s.h, 0.0508);
+test('known iPhone display size comes from the table, in meters', () => {
+  const d = displaySizeM(428, 926, 3, true); // 12/13 Pro Max
+  assert.equal(d.known, true);
+  near(d.w, 0.0712);
+  near(d.h, 0.1541);
+  const land = displaySizeM(926, 428, 3, true); // same phone in landscape
+  near(land.w, 0.1541);
+  near(land.h, 0.0712);
+});
+
+test('unknown displays use 2.5 in (mobile) or 8 in (desktop) height', () => {
+  const m = displaySizeM(360, 800, 2, true);
+  assert.equal(m.known, false);
+  near(m.h, 2.5 * 0.0254);
+  near(m.w, 2.5 * 0.0254 * (360 / 800));
+  near(displaySizeM(1920, 1080, 1, false).h, 8 * 0.0254);
+});
+
+test('the visible page is the same fraction of the display in meters', () => {
+  const page = pageSizeM({ w: 0.0712, h: 0.1541 }, 428, 751, 428, 926);
+  near(page.w, 0.0712);
+  near(page.h, 0.1541 * (751 / 926));
 });
 
 test('eye distance comes from the iris gap and IPD', () => {
@@ -24,12 +42,6 @@ test('eye distance comes from the iris gap and IPD', () => {
   const eye = eyeFromIris({ x: 0.45, y: 0.5, z: 0 }, { x: 0.55, y: 0.5, z: 0 }, 640, 480, CAL, 0);
   near(eye.z, 0.32, 1e-6);
   near(eye.x, 0, 1e-9);
-});
-
-test('known iPhone screens map to CSS px per inch in either orientation', () => {
-  near(knownCssPpi(390, 844, 3), 460 / 3);
-  near(knownCssPpi(844, 390, 3), 460 / 3);
-  assert.equal(knownCssPpi(1920, 1080, 1), null);
 });
 
 test('iris size reference gives distance', () => {

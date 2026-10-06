@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { createScene } from './scene.js';
 import {
-  screenSizeMeters,
+  displaySizeM,
+  pageSizeM,
   eyeFromIris,
-  knownCssPpi,
   knownFrontCameraFov,
   fovForMeasuredDistance,
   screenModelKey,
@@ -39,7 +39,6 @@ const IS_PHONE = matchMedia('(pointer: coarse)').matches && Math.min(screen.widt
 // ---------- settings ----------
 
 const DEFAULTS = {
-  pxPerInch: knownCssPpi(screen.width, screen.height, devicePixelRatio) ?? (IS_PHONE ? 153 : 96),
   ipdMm: 63,
   fovDeg: knownFrontCameraFov(screen.width, screen.height, devicePixelRatio) ?? 70,
   camGapMm: 0, // fine adjustment of the front camera's position, from the display's top edge
@@ -70,7 +69,6 @@ const SLIDERS = [
     hint: 'Added to the measured eye distance. Raise it if leaning in changes the view too much.',
   },
   { key: 'worldScale', label: 'World scale', unit: '×', min: 0.1, max: 2, step: 0.01, hint: 'Size of the virtual objects; 1 m stays 1 m.' },
-  { key: 'pxPerInch', label: 'Screen density', unit: 'css px/in', min: 70, max: 220, step: 1, hint: 'Sets the physical size of the window.' },
   { key: 'ipdMm', label: 'Eye spacing (IPD)', unit: 'mm', min: 50, max: 76, step: 0.5 },
   { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the distance readout against a ruler.' },
   {
@@ -135,10 +133,19 @@ const { scene, setWorldScale } = createScene();
 const camera = new THREE.PerspectiveCamera();
 camera.matrixAutoUpdate = true;
 
-let screenM = { w: 0.07, h: 0.15 };
+// Real-world sizes (meters). The display's physical size comes from the iPhone table, or
+// the fallback height (2.5 in mobile, 8 in desktop). The visible page we render into is the
+// fraction of the display it covers. Screen values are only ever used as ratios.
+let displayM = { w: 0.07, h: 0.15, known: false };
+let screenM = { w: 0.07, h: 0.15 }; // the visible page = the window
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
-  screenM = screenSizeMeters(innerWidth, innerHeight, settings.pxPerInch);
+  // Orient the screen's values like the page (iOS reports screen size in portrait).
+  const landscape = innerWidth > innerHeight;
+  const sw = landscape ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
+  const sh = landscape ? Math.min(screen.width, screen.height) : Math.max(screen.width, screen.height);
+  displayM = displaySizeM(sw, sh, devicePixelRatio, IS_PHONE);
+  screenM = pageSizeM(displayM, innerWidth, innerHeight, sw, sh);
 }
 addEventListener('resize', resize);
 resize();
@@ -211,7 +218,7 @@ const eyeRaw = neutralEye();
 // Physical display height (meters): the full screen in portrait, from its CSS size and the
 // model's px per inch. The visible page can be shorter (Safari's bars); the front camera
 // sits relative to the display, not the page.
-const displayHeightM = () => (Math.max(screen.width, screen.height) / settings.pxPerInch) * 0.0254;
+const displayHeightM = () => displayM.h;
 // Front camera position relative to the display center: half the display height up.
 const camInScreen = () => [0, displayHeightM() / 2 + settings.camGapMm / 1000, 0];
 
@@ -535,7 +542,7 @@ function renderDebug() {
     `eye→screen  x${cm(eye.x)} y${cm(eye.y)} z${cm(eye.z)} cm  ${deg(offAxis)}° off-axis`,
     `phone rot   yaw${deg(euler.y)} pitch${deg(euler.x)} roll${deg(euler.z)}°  (${orientState})`,
     `phone pos   x${cm(pw[0])} y${cm(pw[1])} z${cm(pw[2])} cm  [${view.source}]`,
-    `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm  ${settings.pxPerInch.toFixed(1)} px/in  ${fps.toFixed(0)} fps`,
+    `page ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm of display ${(displayM.w * 100).toFixed(1)}×${(displayM.h * 100).toFixed(1)} cm (${displayM.known ? 'iPhone table' : 'fallback'})  ${fps.toFixed(0)} fps`,
     `display ${(displayHeightM() * 100).toFixed(1)} cm tall  front camera ${(camInScreen()[1] * 100).toFixed(1)} cm above center`,
   ];
   if (mode === 'camera') {
@@ -721,7 +728,6 @@ function measureCameraFov() {
 }
 
 function onSettingChanged(key) {
-  if (key === 'pxPerInch') resize();
   if (key === 'smoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
