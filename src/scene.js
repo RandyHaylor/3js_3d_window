@@ -3,8 +3,8 @@ import * as THREE from 'three';
 // A real-size room (meters, 1 virtual meter = 1 real meter): 15 × 15 ft, 8 ft high, centered
 // on the viewer's starting position. The phone screen starts at the origin, facing the
 // viewer (+z); "in front" is −z. The phone is held 4 ft above the floor.
-// Objects are 2–5 ft high, stand on the floor all around the viewer (more of them in
-// front), and the closest is 3 ft away.
+// Objects are small shapes on thin poles, 2–5 ft high, evenly all around the viewer,
+// 4–7 ft away.
 const FT = 0.3048;
 const ROOM = { x0: -7.5 * FT, x1: 7.5 * FT, y0: -4 * FT, y1: 4 * FT, z0: -7.5 * FT, z1: 7.5 * FT };
 const GRID_STEP = 1 * FT;
@@ -93,66 +93,59 @@ function spot(azDeg, distFt) {
   return { x: Math.sin(a) * distFt * FT, z: -Math.cos(a) * distFt * FT };
 }
 
-// A stand from the floor up to `heightFt`, with `top` (a mesh centered on its own origin,
-// `topFt` tall) resting on it. Total height = heightFt + topFt.
-function onStand(azDeg, distFt, heightFt, standColor, top, topFt) {
+// A thin pole from the floor with `top` (a mesh centered on its own origin, about
+// 2·radius tall) resting on it; the top of the shape is `topFt` above the floor.
+const POLE_RADIUS = 0.012;
+function onPole(azDeg, distFt, topFt, top, radius) {
   const g = new THREE.Group();
   const { x, z } = spot(azDeg, distFt);
-  const len = heightFt * FT;
-  const stand = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.05, len, 24), std(standColor)));
-  stand.position.set(x, ROOM.y0 + len / 2, z);
-  g.add(stand);
-  top.position.set(x, ROOM.y0 + len + (topFt * FT) / 2, z);
+  const len = topFt * FT - 2 * radius;
+  const pole = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(POLE_RADIUS, POLE_RADIUS, len, 16), std(0x8890b0)));
+  pole.position.set(x, ROOM.y0 + len / 2, z);
+  g.add(pole);
+  top.position.set(x, ROOM.y0 + len + radius, z);
   g.add(shadowed(top));
   return g;
 }
 
-// A shape standing directly on the floor; `mesh` is centered on its own origin, `heightFt` tall.
-function onFloor(azDeg, distFt, heightFt, mesh) {
-  const { x, z } = spot(azDeg, distFt);
-  mesh.position.set(x, ROOM.y0 + (heightFt * FT) / 2, z);
-  return shadowed(mesh);
-}
+// Small shapes, radius in meters (2–4 in).
+const SHAPES = [
+  (r, c) => new THREE.Mesh(new THREE.SphereGeometry(r, 32, 24), std(c, { metalness: 0.5, roughness: 0.25 })),
+  (r, c) => new THREE.Mesh(new THREE.IcosahedronGeometry(r, 0), std(c, { flatShading: true })),
+  (r, c) => new THREE.Mesh(new THREE.BoxGeometry(r * 1.4, r * 1.4, r * 1.4), std(c)),
+  (r, c) => new THREE.Mesh(new THREE.TorusKnotGeometry(r * 0.6, r * 0.2, 128, 16), std(c, { metalness: 0.4 })),
+  (r, c) => new THREE.Mesh(new THREE.ConeGeometry(r, r * 2, 24), std(c)),
+  (r, c) => new THREE.Mesh(new THREE.OctahedronGeometry(r, 0), std(c, { flatShading: true })),
+];
+const COLORS = [0xffc94a, 0xff5d8f, 0x5ec8ff, 0x3fd6a0, 0xa98bff, 0xff8a5c];
+
+// Objects evenly all around the starting position (one every 30°), each 4–7 ft away with
+// its top 2–5 ft above the floor, so neighbors differ in distance and height.
+//   [distance ft, top height ft, shape radius in]
+const RING = [
+  [4.0, 3.5, 3],
+  [6.5, 4.5, 2.5],
+  [5.0, 2.5, 3.5],
+  [7.0, 5.0, 2],
+  [4.5, 3.0, 2.5],
+  [6.0, 4.0, 3],
+  [5.5, 2.0, 4],
+  [4.0, 4.5, 2],
+  [6.5, 3.0, 3.5],
+  [5.0, 5.0, 2.5],
+  [7.0, 2.5, 3],
+  [4.5, 4.0, 3.5],
+];
 
 function buildObjects() {
   const g = new THREE.Group();
-
-  // In front (most of the objects). Closest: 3 ft straight ahead, 3.5 ft tall.
-  const knot = new THREE.Mesh(new THREE.TorusKnotGeometry(0.09, 0.028, 160, 24), std(0xffc94a, { metalness: 0.4 }));
-  knot.rotation.set(0.4, 0.6, 0);
-  g.add(onStand(0, 3, 2.75, 0x8890b0, knot, 0.75));
-
-  g.add(onFloor(-28, 4.5, 5, new THREE.Mesh(new THREE.BoxGeometry(0.3, 5 * FT, 0.3), std(0xff5d8f))));
-  g.add(onFloor(26, 4, 2.5, new THREE.Mesh(new THREE.ConeGeometry(0.18, 2.5 * FT, 32), std(0x3fd6a0))));
-
-  const ball = new THREE.Mesh(new THREE.SphereGeometry(0.15, 48, 32), std(0xa98bff, { metalness: 0.6, roughness: 0.2 }));
-  g.add(onStand(-10, 6.2, 3, 0x5ec8ff, ball, 1));
-
-  // A stack of three cubes, 3 ft total.
-  for (let i = 0; i < 3; i++) {
-    const s = FT * (1.15 - i * 0.15);
-    const cube = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), std(new THREE.Color().setHSL(0.08 + i * 0.12, 0.7, 0.55)));
-    const { x, z } = spot(14, 5.8);
-    let y = ROOM.y0;
-    for (let j = 0; j < i; j++) y += FT * (1.15 - j * 0.15);
-    cube.position.set(x, y + s / 2, z);
-    cube.rotation.y = i * 0.4;
-    g.add(shadowed(cube));
-  }
-
-  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.03, 24, 96), std(0xff8a5c, { emissive: 0x401808 }));
-  g.add(onStand(3, 7, 3.6, 0x8890b0, ring, 1.4));
-
-  // To the sides.
-  g.add(onFloor(-80, 4, 3, new THREE.Mesh(new THREE.ConeGeometry(0.2, 3 * FT, 32), std(0x3fd6a0))));
-  const side = new THREE.Mesh(new THREE.BoxGeometry(0.35, 4 * FT, 0.25), std(0xff8a5c));
-  side.rotation.y = 0.5;
-  g.add(onFloor(85, 4.5, 4, side));
-
-  // Behind.
-  const behindBall = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), std(0xffffff, { flatShading: true }));
-  g.add(onStand(160, 4, 1.5, 0xff5d8f, behindBall, 1));
-  g.add(onFloor(-150, 5, 5, new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 5 * FT, 32), std(0x5ec8ff))));
+  const INCH = FT / 12;
+  RING.forEach(([dist, top, rIn], i) => {
+    const r = rIn * INCH;
+    const shape = SHAPES[i % SHAPES.length](r, COLORS[(i * 5) % COLORS.length]);
+    shape.rotation.set(0.3 * i, 0.5 * i, 0);
+    g.add(onPole(i * 30, dist, top, shape, r));
+  });
 
   const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.08, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff2c4 }));
   lamp.position.set(0, ROOM.y1 - 0.15, 0);
