@@ -20,8 +20,6 @@ import {
 } from './calibration.js';
 import {
   rotate,
-  screenInWorld,
-  generalizedPerspective,
   screenPoseFromCamera,
   relativePose,
   screenFromPose,
@@ -33,7 +31,6 @@ import { PhoneTracker } from './phoneTracker.js';
 import { FrameSource } from './frameSource.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
 
-const NEAR = 0.005;
 const FAR = 6;
 const LOST_AFTER = 0.25; // s without a face before the view is blanked
 
@@ -55,7 +52,7 @@ const DEFAULTS = {
   showPreview: false,
   phoneTracking: true,
   showStats: false, // stats drawer (top-left ▾)
-  eyeCamera: false, // false: camera at the window (default); true: camera at the eye, off-axis frustum  // Automatic eye-position corrections (see calibration.js), kept between visits.
+  // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
   eyeDepthOffset: 0, // meters
@@ -85,9 +82,7 @@ const TOGGLES = [
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
   { key: 'phoneTracking', label: 'Phone tracking (AlvaAR room tracking)' },
-  { key: 'autoEyeCal', label: 'Automatic eye correction (experimental; assumes a still head)' },
-  { key: 'eyeCamera', label: 'Camera at the eye (off-axis) instead of at the window' },
-];
+  { key: 'autoEyeCal', label: 'Automatic eye correction (experimental; assumes a still head)' },];
 
 // v2: new defaults (iris scale, no automatic eye correction); v1 values are not carried over.
 const STORAGE_KEY = '3d-window-settings-v2';
@@ -187,9 +182,20 @@ const distStats = { eyes: new Jitter(), eyes2d: new Jitter(), iris: new Jitter()
 
 // Meters per AlvaAR unit, from AlvaAR's motion vs. the accelerometer.
 const motionScale = new MotionScaleEstimator();
+// The phone counts as moving only while the accelerometer says so. The camera position
+// (the phone position) may only change then.
+const phoneMotion = { acc: 0, lastMovingT: -Infinity, hasData: false };
+const MOVING_ACCEL = 0.2; // m/s², smoothed magnitude
+const MOVING_HOLD = 0.3; // s
+const phoneIsMoving = () => performance.now() / 1000 - phoneMotion.lastMovingT < MOVING_HOLD;
 addEventListener('devicemotion', (e) => {
   const a = e.acceleration; // without gravity, m/s²
-  if (a && a.x !== null) motionScale.addImu([a.x, a.y, a.z], performance.now() / 1000);
+  if (!a || a.x === null) return;
+  const t = performance.now() / 1000;
+  phoneMotion.hasData = true;
+  motionScale.addImu([a.x, a.y, a.z], t);
+  phoneMotion.acc += (Math.hypot(a.x, a.y, a.z) - phoneMotion.acc) * 0.3;
+  if (phoneMotion.acc > MOVING_ACCEL) phoneMotion.lastMovingT = t;
 });
 
 // Face-tracked eye before the automatic correction (screen frame, meters).
@@ -342,13 +348,6 @@ function updateTracking(t, nowMs) {
   else setStatus('Tracking', 'ok');
 }
 
-// Eye-first camera: anchor eye in the world → screen placement → rays from the eye
-// through the screen corners (generalized perspective projection).
-const basis = new THREE.Matrix4();
-const vr = new THREE.Vector3();
-const vu = new THREE.Vector3();
-const vn = new THREE.Vector3();
-
 // Phone pose measured by AlvaAR (front camera), as a Three.js-style camera pose using
 // the same conversion as AlvaAR's own Three.js connector.
 const alvaM = new THREE.Matrix4();
@@ -381,63 +380,55 @@ function measuredPhonePose() {
   return relativePose(ref, now);
 }
 
-function updateCamera(t) {
-  const eyeS = [eye.x, eye.y, eye.z];
-  let s;
-  if (settings.useOrientation) orient.relative(phoneQ);
-  else phoneQ.identity();
+// The phone's position in the world. This is the camera position. It starts at the origin
+// (on Start/Recenter) and changes ONLY while the phone itself is physically moving.
+let phonePos = [0, 0, 0];
+let lastTrackedP = null; // AlvaAR's previous phone position, to take frame-to-frame deltas
 
-  const measured = measuredPhonePose();
+// The camera:
+//   position = phone position in space
+//   rotation = the eye → phone vector
+//   FOV      = from the eye → phone distance and the display's width and height
+// The eye position is only used for the rotation and the FOV. It never moves the camera.
+function updateCamera(t) {
+  const sensors = settings.useOrientation && orient.hasData;
+  if (sensors) orient.relative(phoneQ);
+  else phoneQ.identity(); // no motion sensors (e.g. a computer screen): the screen is fixed
+  const q = { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w };
+
+  // Phone position: AlvaAR's motion is applied only while the accelerometer shows the
+  // phone itself moving. Without motion sensors the position never changes.
+  const measured = sensors && phoneMotion.hasData ? measuredPhonePose() : null;
   if (measured) {
-    // The window is the phone's pose in the world: position from AlvaAR, rotation from the
-    // motion sensors when available (AlvaAR's rotation otherwise). The eye is then placed
-    // from the window by face tracking; it never moves the window.
-    const useImu = settings.useOrientation && orient.hasData;
-    const q = useImu ? { x: phoneQ.x, y: phoneQ.y, z: phoneQ.z, w: phoneQ.w } : measured.q;
-    s = screenFromPose(measured.p, q, screenM.w, screenM.h);
-    const e = rotate(q, eyeS);
-    eyeAnchor = [s.center[0] + e[0], s.center[1] + e[1], s.center[2] + e[2]];
-    view.source = 'AlvaAR';
+    if (lastTrackedP && phoneIsMoving()) {
+      for (let i = 0; i < 3; i++) phonePos[i] += measured.p[i] - lastTrackedP[i];
+    }
+    lastTrackedP = measured.p;
     view.measuredQ = measured.q;
     if (!track.lost && settings.autoEyeCal) updateEyeCorrection(measured, t);
   } else {
-    // No measured position: the phone stays at the world origin. Its rotation (if used)
-    // only turns the window; the eye is always placed from the phone by face tracking.
-    eyeAnchor = rotate(phoneQ, eyeS);
-    s = screenInWorld(eyeAnchor, phoneQ, eyeS, screenM.w, screenM.h);
-    view.source = settings.useOrientation && orient.hasData ? 'phone fixed, rotation on' : 'phone fixed';
+    lastTrackedP = null;
   }
 
-  const d = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, NEAR).d; // eye → screen plane
-  if (!(d > 0.02)) return false; // eye at or behind the screen plane
-  view.phoneW = s.center;
-  view.d = d;
+  const s = screenFromPose(phonePos, q, screenM.w, screenM.h);
+  // Where the eye is, relative to the phone: used only for the camera's rotation and FOV.
+  const e = rotate(q, [eye.x, eye.y, eye.z]);
+  eyeAnchor = [phonePos[0] + e[0], phonePos[1] + e[1], phonePos[2] + e[2]];
 
-  if (!settings.eyeCamera) {
-    // Window camera (default): the camera sits at the window, looks along the eye → phone
-    // vector, and its field of view is the angle the screen covers from the eye.
-    const wc = windowCamera(eyeAnchor, s, screenM.w, screenM.h);
-    camera.position.fromArray(wc.position);
-    camera.up.fromArray(wc.up);
-    camera.lookAt(wc.position[0] + wc.dir[0], wc.position[1] + wc.dir[1], wc.position[2] + wc.dir[2]);
-    camera.fov = wc.fovDeg;
-    camera.aspect = wc.aspect;
-    camera.near = 0.01;
-    camera.far = FAR;
-    camera.updateProjectionMatrix();
-    return true;
-  }
+  const wc = windowCamera(eyeAnchor, s, screenM.w, screenM.h);
+  if (!(wc.dist > 0.02)) return false;
+  camera.position.fromArray(phonePos);
+  camera.up.fromArray(wc.up);
+  camera.lookAt(phonePos[0] + wc.dir[0], phonePos[1] + wc.dir[1], phonePos[2] + wc.dir[2]);
+  camera.fov = wc.fovDeg;
+  camera.aspect = wc.aspect;
+  camera.near = 0.01;
+  camera.far = FAR;
+  camera.updateProjectionMatrix();
 
-  // Eye camera: at the eye, image plane = the screen (off-axis frustum through its corners).
-  // A window only shows what is behind it: the near clipping plane IS the screen plane,
-  // so anything between the viewer and the glass is clipped (cut at the frame).
-  const near = d * 0.999;
-  const p = generalizedPerspective(s.pa, s.pb, s.pc, eyeAnchor, near);
-  camera.projectionMatrix.makePerspective(p.left, p.right, p.top, p.bottom, near, FAR);
-  camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-  basis.makeBasis(vr.fromArray(p.vr), vu.fromArray(p.vu), vn.fromArray(p.vn));
-  camera.quaternion.setFromRotationMatrix(basis);
-  camera.position.fromArray(eyeAnchor);
+  view.phoneW = phonePos;
+  view.d = wc.dist;
+  view.source = measured ? (phoneIsMoving() ? 'phone moving' : 'phone still') : 'phone fixed';
   return true;
 }
 
@@ -445,8 +436,9 @@ function recenter() {
   orient.center();
   if (settings.useOrientation) orient.relative(phoneQ);
   else phoneQ.identity();
-  eyeAnchor = rotate(phoneQ, [eye.x, eye.y, eye.z]); // phone back at the world origin
-  alvaRef = null; // measured phone pose: the current pose becomes the origin
+  phonePos = [0, 0, 0]; // phone (camera) back at the world origin
+  lastTrackedP = null;
+  alvaRef = null; // AlvaAR: the current pose becomes the reference
 }
 
 // ---------- loop ----------
