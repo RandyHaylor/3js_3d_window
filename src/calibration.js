@@ -13,14 +13,14 @@
 
 import { rotate } from './viewModel.js';
 
-const LOWPASS_TAU = 0.12; // s, applied identically to both acceleration signals
-const MIN_ACCEL = 0.6; // m/s², only compare samples where the phone is clearly accelerating
-const MIN_PAIRS = 40;
-
-function lowpass(prev, next, dt) {
-  const a = 1 - Math.exp(-dt / LOWPASS_TAU);
-  return prev.map((v, i) => v + (next[i] - v) * a);
-}
+// Compared quantity: the change in average velocity between two consecutive tracker frame
+// intervals. From the tracker: (p2−p1)/h2 − (p1−p0)/h1. From the accelerometer: the
+// acceleration integrated over both intervals with a triangular weight (0 → 1 → 0). The two
+// are equal for any frame spacing, so this works at low camera frame rates too.
+const MIN_DV = 0.05; // m/s, only compare windows with clear motion
+const MAX_GAP = 0.6; // s between tracker frames; longer is a dropout
+const SPAN = 0.15; // s, minimum spacing of the three frames compared (tracker jitter matters less)
+const MIN_PAIRS = 20;
 
 // Estimates meters per tracker unit from tracker positions and accelerometer readings.
 export class MotionScaleEstimator {
@@ -29,11 +29,8 @@ export class MotionScaleEstimator {
   }
 
   reset() {
-    this.imuAcc = [0, 0, 0];
-    this.imuT = null;
-    this.imuHist = []; // recent filtered accelerometer readings { t, mag }
-    this.prev = null; // last tracker sample { t, p, v }
-    this.visAcc = [0, 0, 0];
+    this.imu = []; // recent accelerometer samples { t, a }
+    this.frames = []; // recent tracker samples { t, p }, contiguous (no dropouts)
     this.sumIV = 0;
     this.sumVV = 0;
     this.pairs = 0;
@@ -41,50 +38,61 @@ export class MotionScaleEstimator {
 
   // Accelerometer reading without gravity (m/s², any frame), time in seconds.
   addImu(acc, t) {
-    if (this.imuT !== null) this.imuAcc = lowpass(this.imuAcc, acc, Math.max(1e-3, t - this.imuT));
-    else this.imuAcc = acc.slice();
-    this.imuT = t;
-    this.imuHist.push({ t, mag: Math.hypot(...this.imuAcc) });
-    while (this.imuHist.length && this.imuHist[0].t < t - 1) this.imuHist.shift();
-  }
-
-  // Filtered accelerometer magnitude closest to time t.
-  imuAt(t) {
-    let best = null;
-    for (const s of this.imuHist) if (!best || Math.abs(s.t - t) < Math.abs(best.t - t)) best = s;
-    return best && Math.abs(best.t - t) < 0.05 ? best.mag : null;
+    this.imu.push({ t, a: acc });
+    while (this.imu.length && this.imu[0].t < t - 3) this.imu.shift();
   }
 
   // Tracker position (tracker units), time in seconds.
   addPosition(p, t) {
-    const prev = this.prev;
-    if (!prev) {
-      this.prev = { t, p, v: null };
-      return;
+    const f = this.frames;
+    if (f.length && (t - f[f.length - 1].t > MAX_GAP || t <= f[f.length - 1].t)) f.length = 0;
+    f.push({ t, p });
+    while (f.length && f[0].t < t - 2) f.shift();
+    // Newest frame, plus the latest frames at least SPAN before it and before that.
+    const f2 = f[f.length - 1];
+    let f1 = null;
+    let f0 = null;
+    for (let i = f.length - 2; i >= 0; i--) {
+      if (!f1) {
+        if (f[i].t <= f2.t - SPAN) f1 = f[i];
+      } else if (f[i].t <= f1.t - SPAN) {
+        f0 = f[i];
+        break;
+      }
     }
-    const dt = t - prev.t;
-    if (dt <= 1e-3 || dt > 0.25) {
-      // Missing frames: restart differentiation rather than invent a jump.
-      this.prev = { t, p, v: null };
-      return;
-    }
-    const v = p.map((x, i) => (x - prev.p[i]) / dt);
-    if (prev.v) {
-      const acc = v.map((x, i) => (x - prev.v[i]) / dt);
-      this.visAcc = lowpass(this.visAcc, acc, dt);
-      // Backward differences describe the motion about one frame ago.
-      this.pair(t - dt);
-    }
-    this.prev = { t, p, v };
+    if (f0) this.pair(f0, f1, f2);
   }
 
-  pair(t) {
-    const imu = this.imuAt(t);
-    const vis = Math.hypot(...this.visAcc);
-    if (imu === null || imu < MIN_ACCEL) return;
+  pair(f0, f1, f2) {
+    const h1 = f1.t - f0.t;
+    const h2 = f2.t - f1.t;
+    const dvVis = [0, 1, 2].map((i) => (f2.p[i] - f1.p[i]) / h2 - (f1.p[i] - f0.p[i]) / h1);
+    const dvImu = this.integrate(f0.t, f1.t, f2.t);
+    if (!dvImu) return;
+    const imu = Math.hypot(...dvImu);
+    if (imu < MIN_DV) return;
+    const vis = Math.hypot(...dvVis);
     this.sumIV += imu * vis;
     this.sumVV += vis * vis;
     this.pairs++;
+  }
+
+  // ∫ a(τ)·k(τ) dτ over [t0, t2], k rising 0→1 on [t0, t1] and falling 1→0 on [t1, t2].
+  // Returns null if the accelerometer samples don't cover the window.
+  integrate(t0, t1, t2) {
+    const s = this.imu.filter((x) => x.t >= t0 - 0.02 && x.t <= t2 + 0.02);
+    if (s.length < 2 || s[0].t > t0 + 0.05 || s[s.length - 1].t < t2 - 0.05) return null;
+    const k = (tau) => (tau <= t1 ? (tau - t0) / (t1 - t0) : (t2 - tau) / (t2 - t1));
+    const out = [0, 0, 0];
+    for (let i = 1; i < s.length; i++) {
+      const a = Math.max(t0, s[i - 1].t);
+      const b = Math.min(t2, s[i].t);
+      if (b <= a) continue;
+      const mid = (a + b) / 2;
+      const w = Math.max(0, k(mid)) * (b - a);
+      for (let j = 0; j < 3; j++) out[j] += ((s[i - 1].a[j] + s[i].a[j]) / 2) * w;
+    }
+    return out;
   }
 
   // Meters per tracker unit, or null until enough motion has been seen.

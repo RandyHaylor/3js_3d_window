@@ -64,6 +64,23 @@ test('motion scale survives realistic tracker jitter', () => {
   assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.15, `scale ${est.scale} vs ${metersPerUnit}`);
 });
 
+for (const fps of [10, 5, 3]) {
+  test(`motion scale still forms at a low camera frame rate (${fps} fps)`, () => {
+    const metersPerUnit = 0.25;
+    const est = new MotionScaleEstimator();
+    let tv = 0;
+    for (let t = 0; t < 20; t += 0.01) {
+      est.addImu(waveAcc(t), t);
+      if (t >= tv) {
+        est.addPosition(wave(t).map((v) => v / metersPerUnit), t);
+        tv += 1 / fps;
+      }
+    }
+    assert.ok(est.scale !== null, `no estimate at ${fps} fps (${est.pairs} pairs)`);
+    assert.ok(Math.abs(est.scale / metersPerUnit - 1) < 0.1, `scale ${est.scale} at ${fps} fps`);
+  });
+}
+
 test('no estimate while the phone is still', () => {
   const est = new MotionScaleEstimator();
   for (let t = 0; t < 3; t += 1 / 30) {

@@ -155,6 +155,7 @@ resize();
 let mode = 'idle'; // idle | camera | sim
 let tracker = null;
 const frames = new FrameSource(video); // full-FOV camera frame, downscaled once per frame
+const camRate = { fps: 0, lastT: null }; // camera frames processed per second
 const orient = new OrientationTracker();
 let orientState = 'off';
 
@@ -323,6 +324,10 @@ function stopPhoneTracker() {
 function updateTracking(t, nowMs) {
   // One downscale per new camera frame, shared by face and phone tracking.
   const fresh = tracker ? frames.grab() : false;
+  if (fresh) {
+    if (camRate.lastT !== null) camRate.fps += (1 / Math.max(1e-3, t - camRate.lastT) - camRate.fps) * 0.1;
+    camRate.lastT = t;
+  }
   const r = fresh ? tracker.detect(nowMs) : undefined;
   // A new video frame arrived (r is null when it has no face).
   if (r !== undefined && phoneTracker) {
@@ -550,7 +555,7 @@ function renderDebug() {
     lines.push(`dist cm  eyes ${d.eyes.text()}  2D ${d.eyes2d.text()}  iris ${d.iris.text()}  face ${d.face.text()}`);
     lines.push(`face: ${tracker ? tracker.delegate : 'loading'}  using ${settings.useIris ? 'iris' : 'eyes'}`);
     lines.push(
-      `camera: ${video.videoWidth}×${video.videoHeight} → processed ${frames.width}×${frames.height}  FOV setting ${settings.fovDeg}°`
+      `camera: ${video.videoWidth}×${video.videoHeight} → processed ${frames.width}×${frames.height} at ${camRate.fps.toFixed(1)} fps  FOV setting ${settings.fovDeg}°`
     );
     if (phoneTracker && view.source === 'AlvaAR') {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
