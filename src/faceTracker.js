@@ -11,25 +11,46 @@ const MODEL_URL =
 const IRIS_A = 468;
 const IRIS_B = 473;
 
-// Starts the front camera with the widest view available: the sensor's native 4:3 shape at
-// the largest size, so Safari picks the format that reads the whole sensor (iOS has no zoom
-// control for web pages). Requested in landscape terms; Safari rotates it to the phone's
-// orientation. Call synchronously from a user gesture handler.
-export function openFrontCamera(video) {
+// Standard camera sizes offered in Settings (landscape terms; the browser rotates them to
+// the device's orientation). Some webcams crop at small sizes; larger ones may keep the
+// full field of view. 640×480 (0.3 MP) is the smallest offered.
+export const CAMERA_SIZES = [
+  [640, 480],
+  [960, 720],
+  [1280, 720],
+  [1280, 960],
+  [1920, 1080],
+  [1920, 1440],
+  [2560, 1440],
+  [3840, 2160],
+  [4032, 3024],
+];
+
+// Sizes the camera can deliver, from its reported capabilities (all sizes if unknown),
+// largest first. caps: MediaStreamTrack.getCapabilities() result or null.
+export function availableCameraSizes(caps) {
+  const maxW = caps?.width?.max;
+  const maxH = caps?.height?.max;
+  const long = maxW && maxH ? Math.max(maxW, maxH) : Infinity;
+  const short = maxW && maxH ? Math.min(maxW, maxH) : Infinity;
+  return CAMERA_SIZES.filter(([w, h]) => w <= long && h <= short).reverse();
+}
+
+// Starts the front camera at the requested size ('WxH'), or the nearest the camera offers.
+// Call synchronously from a user gesture handler. Resolves to { stream, caps }.
+export function openFrontCamera(video, size = '640x480') {
+  const [width, height] = size.split('x').map(Number);
   return navigator.mediaDevices
     .getUserMedia({
       audio: false,
-      video: {
-        facingMode: 'user',
-        width: { ideal: 4032 },
-        height: { ideal: 3024 },
-        aspectRatio: { ideal: 4 / 3 },
-      },
+      video: { facingMode: 'user', width: { ideal: width }, height: { ideal: height } },
     })
     .then(async (stream) => {
       video.srcObject = stream;
       await video.play();
-      return stream;
+      const track = stream.getVideoTracks()[0];
+      const caps = track && typeof track.getCapabilities === 'function' ? track.getCapabilities() : null;
+      return { stream, caps };
     });
 }
 

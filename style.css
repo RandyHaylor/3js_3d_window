@@ -188,6 +188,15 @@ button:active { transform: scale(0.97); }
 .setting { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; margin: 12px 0; }
 .setting label { font-size: 14px; }
 .setting output { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 13px; }
-.setting input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }.setting .hint { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+.setting input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+.setting select {
+  grid-column: 1 / -1;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  padding: 6px 8px;
+}.setting .hint { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
 .setting.toggle { grid-template-columns: auto 1fr; align-items: center; }
 .setting.toggle input { width: 20px; height: 20px; accent-color: var(--accent); }

@@ -26,7 +26,7 @@ import {
   windowCamera,
 } from './viewModel.js';
 import { Vec3Filter } from './filters.js';
-import { FaceTracker, openFrontCamera } from './faceTracker.js';
+import { FaceTracker, openFrontCamera, availableCameraSizes } from './faceTracker.js';
 import { PhoneTracker } from './phoneTracker.js';
 import { FrameSource } from './frameSource.js';
 import { OrientationTracker, requestOrientationPermission } from './orientation.js';
@@ -51,6 +51,7 @@ const DEFAULTS = {
   showPreview: false,
   phoneTracking: true,
   showStats: false, // stats drawer (top-left ▾)
+  cameraSize: '640x480', // requested front-camera size; larger only if a camera crops at small sizes
   // Automatic eye-position corrections (see calibration.js), kept between visits.
   eyeLateral: 1,
   eyeDepth: 1,
@@ -154,7 +155,8 @@ resize();
 
 let mode = 'idle'; // idle | camera | sim
 let tracker = null;
-const frames = new FrameSource(video); // full-FOV camera frame, downscaled once per frame
+const frames = new FrameSource(video); // camera frame, downscaled once per frame
+let cameraCaps = null; // the front camera's reported capabilities (sizes it can deliver)
 const camRate = { fps: 0, lastT: null }; // camera frames processed per second
 const orient = new OrientationTracker();
 let orientState = 'off';
@@ -609,7 +611,7 @@ function startOrientation() {
 $('start').addEventListener('click', () => {
   startOrientation();
   const cam = navigator.mediaDevices?.getUserMedia
-    ? openFrontCamera(video)
+    ? openFrontCamera(video, settings.cameraSize)
     : Promise.reject(new Error('Camera API unavailable (needs HTTPS and a supported browser).'));
   errorEl.hidden = true;
   mode = 'camera';
@@ -617,7 +619,9 @@ $('start').addEventListener('click', () => {
   showHud();
   setStatus('Starting camera…');
   cam
-    .then(async () => {
+    .then(async ({ caps }) => {
+      cameraCaps = caps;
+      buildSettings(); // the resolution list now reflects what this camera can deliver
       setStatus('Loading face model…');
       const ft = new FaceTracker(frames);
       await ft.init();
@@ -692,6 +696,30 @@ function buildSettings() {
   const body = $('settingsBody');
   body.textContent = '';
   buildSliders(body, SLIDERS);
+
+  // Front-camera resolution: from the largest the camera reports down to 640×480 (0.3 MP).
+  // Processing always works on a ~0.3 MP copy; a larger size only helps if a camera crops
+  // its view at small sizes. Changing it reloads the page.
+  const sizes = availableCameraSizes(cameraCaps).map(([w, h]) => `${w}x${h}`);
+  if (!sizes.includes(settings.cameraSize)) sizes.push(settings.cameraSize);
+  const resRow = document.createElement('div');
+  resRow.className = 'setting';
+  resRow.innerHTML =
+    `<label for="set-cameraSize">Camera resolution</label><output></output>` +
+    `<select id="set-cameraSize">${sizes
+      .map((s) => {
+        const [w, h] = s.split('x').map(Number);
+        const mp = ((w * h) / 1e6).toFixed(1);
+        return `<option value="${s}"${s === settings.cameraSize ? ' selected' : ''}>${w}×${h} (${mp} MP)</option>`;
+      })
+      .join('')}</select>` +
+    `<span class="hint">Raise only if the camera preview is cropped at the default. Reloads the page.</span>`;
+  resRow.querySelector('select').addEventListener('change', (e) => {
+    settings.cameraSize = e.target.value;
+    saveSettings();
+    location.reload();
+  });
+  body.appendChild(resRow);
   for (const s of TOGGLES) {
     const row = document.createElement('label');
     row.className = 'setting toggle';
