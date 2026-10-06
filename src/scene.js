@@ -105,11 +105,12 @@ function buildObjects() {
   const g = new THREE.Group();
   const floorY = BASE_Y;
 
-  // Foreground: a torus knot just behind the glass, on a slim stand.
-  const fgStandH = 0.13;
-  g.add(pedestal(0.012, FOREGROUND_Z, fgStandH, 0.006, 0x8890b0));
-  const knot = shadowed(new THREE.Mesh(new THREE.TorusKnotGeometry(0.018, 0.0055, 160, 24), std(0xffc94a, { metalness: 0.4 })));
-  knot.position.set(0.012, floorY + fgStandH + 0.024, FOREGROUND_Z);
+  // Foreground: a small torus knot (about 1 cm across) 6 in behind the glass, at eye-line
+  // height on a thin stand. Through a phone-sized window only ~2.7 cm is visible at 6 in.
+  const fgStandH = 0.156;
+  g.add(pedestal(0, FOREGROUND_Z, fgStandH, 0.0015, 0x8890b0));
+  const knot = shadowed(new THREE.Mesh(new THREE.TorusKnotGeometry(0.003, 0.0009, 160, 24), std(0xffc94a, { metalness: 0.4 })));
+  knot.position.set(0, floorY + fgStandH + 0.004, FOREGROUND_Z);
   knot.rotation.set(0.4, 0.6, 0);
   g.add(knot);
 
@@ -129,9 +130,9 @@ function buildObjects() {
   ball.position.set(0.13, floorY + 0.035, -0.18);
   g.add(ball);
 
-  // Far: a large ring on the back wall plus a row of cubes.
-  const ring = shadowed(new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.015, 24, 96), std(0xff8a5c, { emissive: 0x401808 })));
-  ring.position.set(0, floorY + 0.24, ROOM.z0 + 0.06);
+  // Far: a ring (about 12 cm across) on the back wall at eye-line height, plus a row of cubes.
+  const ring = shadowed(new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.006, 24, 96), std(0xff8a5c, { emissive: 0x401808 })));
+  ring.position.set(0, floorY + 0.16, ROOM.z0 + 0.06);
   g.add(ring);
   for (let i = 0; i < 7; i++) {
     const s = 0.04;

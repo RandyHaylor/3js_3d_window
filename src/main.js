@@ -42,7 +42,7 @@ const DEFAULTS = {
   pxPerInch: knownCssPpi(screen.width, screen.height, devicePixelRatio) ?? (IS_PHONE ? 153 : 96),
   ipdMm: 63,
   fovDeg: knownFrontCameraFov(screen.width, screen.height, devicePixelRatio) ?? 70,
-  camOffsetMm: 5,
+  camGapMm: 0, // fine adjustment of the front camera's position, from the display's top edge
   worldScale: 1,
   smoothing: 1,
   flipX: false,
@@ -73,7 +73,15 @@ const SLIDERS = [
   { key: 'pxPerInch', label: 'Screen density', unit: 'css px/in', min: 70, max: 220, step: 1, hint: 'Sets the physical size of the window.' },
   { key: 'ipdMm', label: 'Eye spacing (IPD)', unit: 'mm', min: 50, max: 76, step: 0.5 },
   { key: 'fovDeg', label: 'Camera FOV (long side)', unit: '°', min: 40, max: 100, step: 0.5, hint: 'Check the distance readout against a ruler.' },
-  { key: 'camOffsetMm', label: 'Camera above screen top', unit: 'mm', min: -20, max: 30, step: 0.5 },
+  {
+    key: 'camGapMm',
+    label: 'Camera offset from display top',
+    unit: 'mm',
+    min: -20,
+    max: 20,
+    step: 0.5,
+    hint: 'The front camera sits half the display height above its center; this fine-tunes that.',
+  },
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 4, step: 0.05, hint: 'Lower = steadier, higher = snappier.' },
 ];
 const TOGGLES = [
@@ -200,7 +208,12 @@ addEventListener('devicemotion', (e) => {
 
 // Face-tracked eye before the automatic correction (screen frame, meters).
 const eyeRaw = neutralEye();
-const camInScreen = () => [0, screenM.h / 2 + settings.camOffsetMm / 1000, 0];
+// Physical display height (meters): the full screen in portrait, from its CSS size and the
+// model's px per inch. The visible page can be shorter (Safari's bars); the front camera
+// sits relative to the display, not the page.
+const displayHeightM = () => (Math.max(screen.width, screen.height) / settings.pxPerInch) * 0.0254;
+// Front camera position relative to the display center: half the display height up.
+const camInScreen = () => [0, displayHeightM() / 2 + settings.camGapMm / 1000, 0];
 
 // Apply the eye correction: lateral offsets are rescaled, and distance from the camera
 // follows the depth model true = b·raw + δ. Scales come from the automatic fit only when
@@ -267,7 +280,7 @@ function resetCalibration() {
 const calibration = () => ({
   ipdM: settings.ipdMm / 1000,
   fovLongDeg: settings.fovDeg,
-  camOffsetM: settings.camOffsetMm / 1000,
+  camOffsetM: settings.camGapMm / 1000,
   flipX: settings.flipX,
 });
 
@@ -317,11 +330,12 @@ function updateTracking(t, nowMs) {
   if (r) {
     const cal = calibration();
     const iris = { px: irisDiameterPx(r.irises, r.videoW, r.videoH), m: IRIS_DIAMETER_M };
-    const byEyes = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h);
-    const byIris = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, screenM.h, iris);
+    const dispH = displayHeightM(); // the camera sits half of this above the display center
+    const byEyes = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, dispH);
+    const byIris = eyeFromIris(r.a, r.b, r.videoW, r.videoH, cal, dispH, iris);
     if (byEyes) distStats.eyes.add(byEyes.z);
     // Diagnostic: eye spacing from the 2D landmark positions only (no MediaPipe depth term).
-    const by2d = eyeFromIris({ ...r.a, z: 0 }, { ...r.b, z: 0 }, r.videoW, r.videoH, cal, screenM.h);
+    const by2d = eyeFromIris({ ...r.a, z: 0 }, { ...r.b, z: 0 }, r.videoW, r.videoH, cal, dispH);
     if (by2d) distStats.eyes2d.add(by2d.z);
     if (byIris) distStats.iris.add(byIris.z);
     if (r.faceMatrix) distStats.face.add(Math.abs(matrixTranslation(r.faceMatrix)[2]) / 100);
@@ -522,6 +536,7 @@ function renderDebug() {
     `phone rot   yaw${deg(euler.y)} pitch${deg(euler.x)} roll${deg(euler.z)}°  (${orientState})`,
     `phone pos   x${cm(pw[0])} y${cm(pw[1])} z${cm(pw[2])} cm  [${view.source}]`,
     `screen ${(screenM.w * 100).toFixed(1)}×${(screenM.h * 100).toFixed(1)} cm  ${settings.pxPerInch.toFixed(1)} px/in  ${fps.toFixed(0)} fps`,
+    `display ${(displayHeightM() * 100).toFixed(1)} cm tall  front camera ${(camInScreen()[1] * 100).toFixed(1)} cm above center`,
   ];
   if (mode === 'camera') {
     const d = distStats;
