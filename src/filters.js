@@ -62,3 +62,42 @@ export class Vec3Filter {
     return { x: this.fx.filter(p.x, t), y: this.fy.filter(p.y, t), z: this.fz.filter(p.z, t) };
   }
 }
+
+// Drops single bad face-tracking measurements. A point that jumps further from the last
+// accepted one than a head can move in that time (NOISE plus MAX_SPEED·dt) is an outlier,
+// unless CONFIRM outliers in a row agree with each other: then the head really moved
+// there. After a gap longer than MAX_GAP the next point starts fresh.
+const NOISE = 0.03; // m
+const MAX_SPEED = 1.5; // m/s
+const CONFIRM = 3;
+const MAX_GAP = 0.5; // s
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+export class OutlierGate {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.last = null;
+    this.lastT = null;
+    this.pending = [];
+  }
+
+  // p: {x, y, z} in meters, t in seconds. Returns true if p should be used.
+  accept(p, t) {
+    const fresh = this.last === null || t - this.lastT > MAX_GAP;
+    if (fresh || dist(p, this.last) <= NOISE + MAX_SPEED * (t - this.lastT)) return this.take(p, t);
+    const prev = this.pending[this.pending.length - 1];
+    if (prev && dist(p, prev.p) > NOISE + MAX_SPEED * (t - prev.t)) this.pending = [];
+    this.pending.push({ p, t });
+    return this.pending.length >= CONFIRM ? this.take(p, t) : false;
+  }
+
+  take(p, t) {
+    this.last = { x: p.x, y: p.y, z: p.z };
+    this.lastT = t;
+    this.pending = [];
+    return true;
+  }
+}

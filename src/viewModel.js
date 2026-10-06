@@ -90,6 +90,14 @@ export function eyeInWorld(phoneW, q, eyeS) {
 const WORLD_UP = [0, 1, 0];
 const WORLD_BACK = [0, 0, 1];
 
+// Camera up vector for view direction dir (unit): world up with its component along dir
+// removed, so the camera never rolls. Looking (nearly) straight up or down, world up is
+// unusable, so the world's back direction stands in.
+export function levelUp(dir) {
+  const ref = Math.abs(dot(dir, WORLD_UP)) > 0.99 ? WORLD_BACK : WORLD_UP;
+  return normalize(sub(ref, dir.map((v) => v * dot(ref, dir))));
+}
+
 // Window camera: the virtual camera sits at the phone, its rotation is the eye → phone
 // vector (roll kept level with world up), and its field of view is the angle the screen
 // height covers from the eye's distance. The phone's rotation is not an input.
@@ -98,14 +106,10 @@ export function windowCamera(eyeW, phoneW, w, h) {
   const toPhone = sub(phoneW, eyeW);
   const dist = Math.hypot(toPhone[0], toPhone[1], toPhone[2]);
   const dir = toPhone.map((v) => v / dist);
-  // Up: world up with its component along dir removed. Looking (nearly) straight up or
-  // down, world up is unusable, so the world's back direction stands in.
-  const ref = Math.abs(dot(dir, WORLD_UP)) > 0.99 ? WORLD_BACK : WORLD_UP;
-  const up = normalize(sub(ref, dir.map((v) => v * dot(ref, dir))));
   return {
     position: phoneW,
     dir,
-    up,
+    up: levelUp(dir),
     fovDeg: (2 * Math.atan(h / 2 / dist) * 180) / Math.PI,
     aspect: w / h,
     dist,

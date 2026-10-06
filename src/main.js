@@ -26,8 +26,9 @@ import {
   relativePose,
   windowCamera,
   eyeInWorld,
+  levelUp,
 } from './viewModel.js';
-import { Vec3Filter } from './filters.js';
+import { Vec3Filter, OutlierGate } from './filters.js';
 import { FaceTracker, openFrontCamera, availableCameraSizes } from './faceTracker.js';
 import { PhoneTracker } from './phoneTracker.js';
 import { FrameSource } from './frameSource.js';
@@ -46,6 +47,7 @@ const DEFAULTS = {
   camGapMm: 0, // fine adjustment of the front camera's position, from the display's top edge
   worldScale: 1,
   smoothing: 4,
+  rotationSmoothing: 4, // Hz, camera rotation (eye → phone direction)
   flipX: false,
   useIris: true, // iris diameter (11.7 mm) is the physical reference for eye scale
   autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
@@ -84,6 +86,15 @@ const SLIDERS = [
     hint: 'The front camera sits half the display height above its center; this fine-tunes that.',
   },
   { key: 'smoothing', label: 'Smoothing cutoff', unit: 'Hz', min: 0.2, max: 30, step: 0.1, hint: 'Lower = steadier, higher = snappier.' },
+  {
+    key: 'rotationSmoothing',
+    label: 'Camera rotation smoothing',
+    unit: 'Hz',
+    min: 0.2,
+    max: 30,
+    step: 0.1,
+    hint: 'Smooths the eye → phone direction. Lower = steadier, higher = snappier.',
+  },
 ];
 const TOGGLES = [
   { key: 'flipX', label: 'Flip left/right' },
@@ -179,11 +190,16 @@ const filter = new Vec3Filter();
 // applied keeps a still head still while the phone turns. World z is roughly the viewing
 // depth (the viewer faces the phone at Recenter), so it gets the depth settings.
 const worldEyeFilter = new Vec3Filter();
+// Drops single bad eye measurements (in the world) before they reach eyeAnchor.
+const eyeGate = new OutlierGate();
+// Smooths the camera's direction (unit eye → phone vector), setting rotationSmoothing.
+const dirFilter = new Vec3Filter();
 function applySmoothing() {
   const xy = { minCutoff: settings.smoothing, beta: 8 };
   const z = { minCutoff: settings.smoothing * 0.6, beta: 4 };
   filter.setParams(xy, z);
   worldEyeFilter.setParams(xy, z);
+  dirFilter.setParams({ minCutoff: settings.rotationSmoothing, beta: 2 });
 }
 applySmoothing();
 
@@ -399,6 +415,7 @@ function updateTracking(t, nowMs) {
       if (track.lost) {
         filter.reset();
         worldEyeFilter.reset();
+        eyeGate.reset();
         track.lost = false;
       }
       track.lastSeen = t;
@@ -409,8 +426,11 @@ function updateTracking(t, nowMs) {
       // position and rotation now, then smoothed in the world.
       const m = correctEye(e);
       const wp = eyeInWorld(phonePos, phoneRotation(), [m.x, m.y, m.z]);
-      const w = worldEyeFilter.filter({ x: wp[0], y: wp[1], z: wp[2] }, t);
-      eyeAnchor = [w.x, w.y, w.z];
+      const measuredW = { x: wp[0], y: wp[1], z: wp[2] };
+      if (eyeGate.accept(measuredW, t)) {
+        const w = worldEyeFilter.filter(measuredW, t);
+        eyeAnchor = [w.x, w.y, w.z];
+      }
     }
   }
   if (t - track.lastSeen > LOST_AFTER) track.lost = true;
@@ -515,9 +535,13 @@ function updateCamera(t) {
 
   const wc = windowCamera(eyeAnchor, phonePos, screenM.w, screenM.h);
   if (!(wc.dist > 0.02)) return false;
+  // Camera rotation: the eye → phone direction, smoothed (rotationSmoothing), roll level.
+  const ds = dirFilter.filter({ x: wc.dir[0], y: wc.dir[1], z: wc.dir[2] }, t);
+  const dl = Math.hypot(ds.x, ds.y, ds.z);
+  const dir = [ds.x / dl, ds.y / dl, ds.z / dl];
   camera.position.fromArray(phonePos);
-  camera.up.fromArray(wc.up);
-  camera.lookAt(phonePos[0] + wc.dir[0], phonePos[1] + wc.dir[1], phonePos[2] + wc.dir[2]);
+  camera.up.fromArray(levelUp(dir));
+  camera.lookAt(phonePos[0] + dir[0], phonePos[1] + dir[1], phonePos[2] + dir[2]);
   camera.fov = wc.fovDeg;
   camera.aspect = wc.aspect;
   camera.near = 0.01;
@@ -548,6 +572,8 @@ function recenter() {
   // The world is now the phone's current pose, so the eye is where the phone sees it.
   if (eyeAnchor) eyeAnchor = [eye.x, eye.y, eye.z];
   worldEyeFilter.reset();
+  eyeGate.reset();
+  dirFilter.reset();
 }
 
 // ---------- loop ----------
@@ -875,7 +901,7 @@ function measureCameraFov() {
 }
 
 function onSettingChanged(key) {
-  if (key === 'smoothing') applySmoothing();
+  if (key === 'smoothing' || key === 'rotationSmoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
   if (key === 'phoneTracking') settings.phoneTracking ? startPhoneTracker() : stopPhoneTracker();
