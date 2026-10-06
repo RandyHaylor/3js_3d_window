@@ -580,15 +580,16 @@ function phoneRotationAt(t) {
 // FOV come from phonePos and eyeAnchor, and those change ONLY when this frame has the
 // complete set:
 //   face     : the eye measured in this frame (e, phone frame), accepted by the outlier gate
-//   rotation : motion-sensor samples within SYNC_WINDOW on both sides of tc
 //   position : AlvaAR tracking this same frame, with the scale known
 // If any part is missing, everything holds its last good value. AlvaAR's motion over held
 // frames is applied on the next complete frame (deltas are taken from the last complete
 // frame on the same AlvaAR map), and only if the phone was physically moving meanwhile.
-// Without motion sensors (e.g. a computer) or with phone tracking off, the phone pose is
-// fixed by design, so rotation and position count as present.
-const SYNC_WINDOW = 0.04; // s
-const sync = { ok: 0, noFace: 0, noRotation: 0, noPosition: 0, outlier: 0 };
+// Without motion sensors (e.g. a computer) or with phone tracking off, the phone position
+// is fixed by design, so it counts as present.
+// Phone rotation is not part of the set: it runs on its own in real time. Here it is only
+// read from its history at tc, to tell the phone turning apart from the head moving; the
+// keystone pass applies it live every render frame.
+const sync = { ok: 0, noFace: 0, noPosition: 0, outlier: 0 };
 let lastCompleteT = -Infinity;
 let lastTrackedMap = -1; // AlvaAR map of lastTrackedP
 
@@ -600,7 +601,6 @@ function syncedUpdate(tc, e) {
   };
   if (!e) return hold('noFace', 'no face');
   const sensors = settings.useOrientation && orient.hasData;
-  if (sensors && !orient.history.covers(tc, SYNC_WINDOW)) return hold('noRotation', 'no rotation sample at frame time');
   let measured = null;
   if (sensors && phoneTracker) {
     measured = phoneMotion.hasData ? measuredPhonePose(tc) : null;
@@ -834,9 +834,9 @@ function renderDebug() {
       `timing: frame time from ${frames.timeSource}, camera delay ${delay === null ? 'measuring (turn the phone a little)' : `${(delay * 1000).toFixed(0)} ms`}`
     );
     // Synced updates: camera frames with the complete set, and why the others held.
-    const n = sync.ok + sync.noFace + sync.noRotation + sync.noPosition + sync.outlier;
+    const n = sync.ok + sync.noFace + sync.noPosition + sync.outlier;
     lines.push(
-      `sync: ${n ? Math.round((100 * sync.ok) / n) : 0}% of ${n} frames complete  held: face ${sync.noFace}, rotation ${sync.noRotation}, position ${sync.noPosition}, outlier ${sync.outlier}`
+      `sync: ${n ? Math.round((100 * sync.ok) / n) : 0}% of ${n} frames complete  held: face ${sync.noFace}, position ${sync.noPosition}, outlier ${sync.outlier}`
     );
     if (phoneTracker && view.measuredQ) {
       // Rotation since Recenter from AlvaAR vs. the motion sensors: should agree.
