@@ -56,7 +56,9 @@ const DEFAULTS = {
   autoEyeCal: false, // automatic eye-correction fit (assumes a still head; off until verified)
   useOrientation: true,
   showPreview: false,
-  phoneTracking: true,
+  // full: face + room tracking; face: face tracking only (phone position fixed);
+  // ar: room tracking only (eye assumed straight out from the screen)
+  trackingMode: 'full',
   maskViewer: true, // blank the viewer's head and torso out of AlvaAR's frames
   showStats: false, // stats drawer (top-left ▾)
   cameraSize: '640x480', // requested front-camera size; larger only if a camera crops at small sizes
@@ -117,7 +119,6 @@ const TOGGLES = [
   { key: 'useIris', label: 'Use iris size for distance (instead of eye spacing)' },
   { key: 'useOrientation', label: 'Use phone orientation' },
   { key: 'showPreview', label: 'Show camera preview' },
-  { key: 'phoneTracking', label: 'Phone tracking (AlvaAR room tracking)' },
   { key: 'maskViewer', label: 'Mask the viewer out of room tracking (grey boxes)' },
   { key: 'autoEyeCal', label: 'Automatic eye correction (experimental; assumes a still head)' },];
 
@@ -450,7 +451,7 @@ let phoneTracker = null;
 let seenResets = 0;
 
 function startPhoneTracker() {
-  if (phoneTracker || mode !== 'camera' || !tracker || !settings.phoneTracking) return;
+  if (phoneTracker || mode !== 'camera' || !tracker || settings.trackingMode === 'face') return;
   const pt = new PhoneTracker(frames);
   phoneTracker = pt;
   pt.canvas.className = 'alva-preview';
@@ -554,7 +555,8 @@ function updateTracking(t, nowMs) {
   if (!tracker) {
     setStatus('Loading face model…');
   } else {
-    const eyes = track.lost ? 'Eyes ✗' : 'Eyes ✓';
+    const arOnly = settings.trackingMode === 'ar';
+    const eyes = arOnly ? 'AR only' : track.lost ? 'Eyes ✗' : 'Eyes ✓';
     const room = !pt ? '' : pt.status === 'tracking' ? ' · Room ✓' : ' · Room …';
     const scale = !pt
       ? ''
@@ -562,9 +564,12 @@ function updateTracking(t, nowMs) {
         ? ' · Scale ✓'
         : knownScale() !== null
           ? ' · Scale (last)'
-          : ' · Scale: sway the phone a little';
-    const ready = !track.lost && (!pt || (pt.status === 'tracking' && knownScale() !== null));
-    setStatus(eyes + room + scale, ready ? 'ok' : track.lost ? 'warn' : '');
+          : arOnly
+            ? ' · No scale: measure it once in Full mode'
+            : ' · Scale: sway the phone a little';
+    const faceOk = arOnly || !track.lost;
+    const ready = faceOk && (!pt || (pt.status === 'tracking' && knownScale() !== null));
+    setStatus(eyes + room + scale, ready ? 'ok' : !faceOk ? 'warn' : '');
   }
 }
 
@@ -648,6 +653,7 @@ function syncedUpdate(tc, e) {
     view.source = `holding: ${why}`;
     logSync(tc, key);
   };
+  if (settings.trackingMode === 'ar') return arOnlyUpdate(tc, hold);
   if (!e) return hold('noFace', 'no face');
   const sensors = settings.useOrientation && orient.hasData;
   const m = correctEye(e); // this frame's eye relative to the phone (meters)
@@ -712,7 +718,34 @@ function syncedUpdate(tc, e) {
       ? 'synced'
       : phoneTracker
         ? 'synced (no scale yet: phone position held)'
-        : 'synced (phone tracking off)';
+        : 'face only: phone position fixed';
+}
+
+// "Only AR" mode, once per camera frame: AlvaAR moves the phone position (with the last
+// scale found); face tracking isn't used. The eye is assumed straight out from the screen
+// (updateCamera places it every render frame), so the camera follows the phone like a
+// classic AR window.
+function arOnlyUpdate(tc, hold) {
+  const sensors = settings.useOrientation && orient.hasData;
+  if (!sensors) {
+    view.source = 'AR only (no motion sensors: phone fixed)';
+    return;
+  }
+  if (!phoneTracker) return hold('noPosition', 'room tracking not running');
+  if (knownScale() === null) return hold('noPosition', 'no scale yet (measure it once in Full mode)');
+  const measured = phoneMotion.hasData ? measuredPhonePose(tc) : null;
+  if (!measured) return hold('noPosition', 'room not tracked');
+  const moved = phoneMotion.lastMovingT >= lastCompleteT - MOVING_HOLD;
+  if (lastTrackedP && lastTrackedMap === alvaResets && moved) {
+    phonePos = phonePos.map((v, i) => v + measured.p[i] - lastTrackedP[i]);
+  }
+  lastTrackedP = measured.p;
+  lastTrackedMap = alvaResets;
+  view.measuredQ = measured.q;
+  lastCompleteT = tc;
+  sync.ok++;
+  logSync(tc, 'ok', { pos: phonePos.map(r4) });
+  view.source = 'AR only';
 }
 
 // The camera:
@@ -724,6 +757,12 @@ function syncedUpdate(tc, e) {
 function updateCamera(t) {
   // Simulated eye: a new "measurement" every frame.
   if (mode === 'sim') eyeAnchor = eyeInWorld(phonePos, phoneRotation(), [eye.x, eye.y, eye.z]);
+  // Only AR: the eye is straight out from the screen at the default distance, placed every
+  // frame from the live phone pose.
+  else if (settings.trackingMode === 'ar') {
+    const n = neutralEye();
+    eyeAnchor = eyeInWorld(phonePos, phoneRotation(), [n.x, n.y, n.z]);
+  }
   if (!eyeAnchor) return false;
 
   const wc = windowCamera(eyeAnchor, phonePos, screenM.w, screenM.h);
@@ -786,7 +825,7 @@ renderer.setAnimationLoop((nowMs) => {
 
   // Until the eye has been seen once there is nothing meaningful to show. After that, a
   // lost eye stays where it was last seen.
-  const hasEye = mode !== 'camera' || (tracker && eyeAnchor !== null);
+  const hasEye = mode !== 'camera' || (tracker && (eyeAnchor !== null || settings.trackingMode === 'ar'));
   setWorldScale(settings.worldScale);
   updateScene(dt); // model animation
   if (hasEye && updateCamera(t)) {
@@ -1055,9 +1094,30 @@ function buildSliders(body, list) {
   }
 }
 
+const TRACKING_MODES = [
+  { key: 'full', label: 'Full (face + room tracking)' },
+  { key: 'face', label: 'Only face tracking (phone position fixed)' },
+  { key: 'ar', label: 'Only AR (room tracking, no face tracking)' },
+];
+
 function buildSettings() {
   const body = $('settingsBody');
   body.textContent = '';
+
+  // Tracking mode.
+  const modeRow = document.createElement('div');
+  modeRow.className = 'setting';
+  modeRow.innerHTML =
+    `<label for="set-trackingMode">Mode</label><output></output>` +
+    `<select id="set-trackingMode">${TRACKING_MODES.map(
+      (m) => `<option value="${m.key}"${m.key === settings.trackingMode ? ' selected' : ''}>${m.label}</option>`
+    ).join('')}</select>` +
+    `<span class="hint">Only AR uses the last scale measured in Full mode, and assumes your eye is straight out from the screen.</span>`;
+  modeRow.querySelector('select').addEventListener('change', (e) => {
+    settings.trackingMode = e.target.value;
+    onSettingChanged('trackingMode');
+  });
+  body.appendChild(modeRow);
 
   // Experience: which scene is shown.
   const exRow = document.createElement('div');
@@ -1184,7 +1244,7 @@ function onSettingChanged(key) {
   if (key === 'smoothing' || key === 'rotationSmoothing' || key === 'eyeWorldSmoothing') applySmoothing();
   if (key === 'showPreview') video.classList.toggle('preview', settings.showPreview);
   if (key === 'useOrientation') recenter();
-  if (key === 'phoneTracking') settings.phoneTracking ? startPhoneTracker() : stopPhoneTracker();
+  if (key === 'trackingMode') settings.trackingMode === 'face' ? stopPhoneTracker() : startPhoneTracker();
   saveSettings();
 }
 
